@@ -1,0 +1,4 @@
+allowBuilds:
+  '@ffmpeg-installer/darwin-arm64': true
+minimumReleaseAgeExclude:
+  - lucide-react@1.64.0
