@@ -2746,6 +2746,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum",
+ "encoding_rs",
  "futures-util",
  "librqbit",
  "mime_guess",

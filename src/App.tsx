@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { errorMessage, fileName, formatBytes } from './format';
 import { attachCompatibleVideo } from './compatible';
+import SubtitleControls from './SubtitleControls';
 import type { AppInfo, Playback, PlaybackMode, TorrentStats, TorrentView, VideoFile } from './types';
 
 const desktop = isTauri();
@@ -246,6 +247,7 @@ function App() {
         <section className="below-player">
           <div className="playback-mode"><div className="mode-heading"><Activity size={17} /><div><strong>A tu ritmo, a tu manera.</strong><p>{mode === 'direct' ? 'Usá el decodificador del sistema, sin convertir el video.' : 'FFmpeg convierte a H.264 y AAC mientras reproduce. Puede usar más CPU.'}</p></div></div><div className="segmented-control" aria-label="Modo de reproducción"><button className={mode === 'direct' ? 'selected' : ''} aria-pressed={mode === 'direct'} disabled={disabled} onClick={() => changeMode('direct')}>{mode === 'direct' && <Check size={13} />}Directo</button><button className={mode === 'compatible' ? 'selected' : ''} aria-pressed={mode === 'compatible'} disabled={disabled || !info?.ffmpegAvailable} title={info?.ffmpegAvailable ? 'Convertir con FFmpeg' : 'FFmpeg no está disponible en esta instalación'} onClick={() => changeMode('compatible')}>{mode === 'compatible' && <Check size={13} />}FFmpeg</button></div></div>
           {mode === 'compatible' && <p className="compat-note">La conversión empieza desde cero. Adelantar y retroceder todavía no están disponibles en este modo.</p>}
+          <SubtitleControls key={localPath ? `local:${localPath}` : torrent ? `torrent:${torrent.id}:${torrent.selectedFile}` : 'empty'} videoRef={videoRef} playback={playback} torrentId={torrent?.id} files={torrent?.subtitles || []} disabled={disabled} />
           {torrent && <div className="transfer-panel"><div className="transfer-top"><span><Radio size={14} />{stats?.finished ? 'Descarga completa · compartiendo' : stats?.state || 'Conectando con peers'}</span><strong>{progress.toLocaleString('es', { maximumFractionDigits: 1 })}%</strong></div><div className="progress-track"><div style={{ width: `${progress}%` }} /></div><div className="transfer-details"><span><ArrowDown size={13} />{formatBytes(stats?.downloadSpeed || 0)}/s</span><span><ArrowUp size={13} />{formatBytes(stats?.uploadSpeed || 0)}/s</span><span><Users size={13} />{stats?.peers || 0} peers</span><span>{formatBytes(stats?.progressBytes || 0)} / {formatBytes(stats?.totalBytes || 0)}</span></div>{statsError && <p className="stats-error">No se pudo actualizar el estado: {statsError}</p>}</div>}
         </section>
 

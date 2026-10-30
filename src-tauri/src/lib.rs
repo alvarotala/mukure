@@ -1,4 +1,8 @@
+mod embedded;
 mod media;
+#[cfg(test)]
+mod subtitle_torrent_tests;
+mod subtitles;
 #[cfg(test)]
 mod torrent_tests;
 
@@ -15,8 +19,11 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use subtitles::{SubtitleTrack, MAX_SUBTITLE_BYTES};
 use tauri::{Manager, State};
+use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, OnceCell};
+use tokio_util::sync::CancellationToken;
 
 struct AppState {
     cache_root: PathBuf,
@@ -26,6 +33,13 @@ struct AppState {
 struct ActiveTorrent {
     handle: Arc<ManagedTorrent>,
     selected: Option<usize>,
+    subtitles_cancel: CancellationToken,
+}
+
+struct EmbeddedRequest {
+    playback_url: String,
+    request_id: String,
+    cancel: CancellationToken,
 }
 
 struct Engine {
@@ -33,6 +47,7 @@ struct Engine {
     media: Arc<MediaServer>,
     active: Mutex<Option<ActiveTorrent>>,
     cache: tempfile::TempDir,
+    embedded_request: Mutex<Option<EmbeddedRequest>>,
 }
 
 #[derive(Serialize)]
@@ -58,6 +73,7 @@ struct TorrentView {
     id: usize,
     name: String,
     files: Vec<VideoFile>,
+    subtitles: Vec<VideoFile>,
     selected_file: Option<usize>,
 }
 
@@ -130,6 +146,7 @@ impl Engine {
             media,
             active: Mutex::new(None),
             cache,
+            embedded_request: Mutex::new(None),
         }))
     }
 
@@ -183,19 +200,26 @@ impl Engine {
                 .context("Se agotó el tiempo al preparar los archivos del torrent")??;
             let api = Api::new(session.clone(), None);
             let details = api.api_torrent_details(id.into())?;
-            let files: Vec<_> = details
-                .files
-                .unwrap_or_default()
-                .into_iter()
-                .enumerate()
-                .filter(|(_, file)| is_video(&file.name))
-                .map(|(id, file)| VideoFile {
+            let mut files = Vec::new();
+            let mut subtitles = Vec::new();
+            for (id, file) in details.files.unwrap_or_default().into_iter().enumerate() {
+                let video = is_video(&file.name);
+                let subtitle = subtitles::is_subtitle(&file.name);
+                if !video && !subtitle {
+                    continue;
+                }
+                let item = VideoFile {
                     id,
                     mime: mime_for(&file.name),
                     name: file.name,
                     length: file.length,
-                })
-                .collect();
+                };
+                if video {
+                    files.push(item);
+                } else {
+                    subtitles.push(item);
+                }
+            }
             if files.is_empty() {
                 return Err(anyhow!(
                     "Este torrent no contiene archivos de video reconocidos"
@@ -205,6 +229,7 @@ impl Engine {
                 id,
                 name: details.name.unwrap_or_else(|| "Torrent".into()),
                 files,
+                subtitles,
                 selected_file: None,
             })
         }
@@ -214,6 +239,7 @@ impl Engine {
                 *active = Some(ActiveTorrent {
                     handle,
                     selected: None,
+                    subtitles_cancel: CancellationToken::new(),
                 });
                 Ok(view)
             }
@@ -231,6 +257,46 @@ impl Engine {
         }
         // Tauri can terminate before Rust destructors run, so clean up explicitly.
         let _ = tokio::fs::remove_dir_all(self.cache.path()).await;
+    }
+
+    async fn read_torrent_subtitle(&self, id: usize, file_id: usize) -> Result<SubtitleTrack> {
+        // Snapshot the handle, then release the lock so playback, stats and
+        // closing the torrent remain responsive while pieces arrive.
+        let (handle, cancel, name, length) = {
+            let active = self.active.lock().await;
+            let torrent = active
+                .as_ref()
+                .filter(|t| t.handle.id() == id)
+                .context("La sesión ya no está activa")?;
+            anyhow::ensure!(torrent.selected.is_some(), "Primero selecciona un video");
+            let session = self.session.get().context("La sesión ya no está activa")?;
+            let details = Api::new(session.clone(), None).api_torrent_details(id.into())?;
+            let files = details.files.context("No hay archivos disponibles")?;
+            let file = files
+                .get(file_id)
+                .filter(|f| subtitles::is_subtitle(&f.name))
+                .context("Selecciona un subtítulo .srt o .vtt")?;
+            anyhow::ensure!(
+                file.length <= MAX_SUBTITLE_BYTES,
+                "El subtítulo supera los 5 MiB"
+            );
+            (
+                torrent.handle.clone(),
+                torrent.subtitles_cancel.clone(),
+                file.name.clone(),
+                file.length,
+            )
+        };
+        tokio::select! {
+            _ = cancel.cancelled() => Err(anyhow!("La selección de video cambió")),
+            result = tokio::time::timeout(Duration::from_secs(45), async {
+                let stream = handle.stream(file_id).await?;
+                let mut bytes = Vec::new();
+                stream.take(MAX_SUBTITLE_BYTES + 1).read_to_end(&mut bytes).await?;
+                anyhow::ensure!(bytes.len() as u64 == length, "El subtítulo está incompleto");
+                subtitles::parse(name, &bytes)
+            }) => result.context("No llegaron los subtítulos en 45 segundos. Comprueba los peers y vuelve a intentar")?,
+        }
     }
 }
 
@@ -317,6 +383,10 @@ async fn select_file(
         return Err("FFmpeg no está instalado. Usa el modo directo o instala FFmpeg y vuelve a abrir la app".into());
     }
     e.media.clear().await;
+    if torrent.selected != Some(file_id) {
+        torrent.subtitles_cancel.cancel();
+        torrent.subtitles_cancel = CancellationToken::new();
+    }
     session
         .update_only_files(&torrent.handle, &HashSet::from([file_id]))
         .await
@@ -393,6 +463,7 @@ async fn remove_torrent(id: usize, state: State<'_, AppState>) -> Result<(), Str
         .filter(|t| t.handle.id() == id)
         .ok_or("La sesión ya no está activa")?;
     e.media.clear().await;
+    torrent.subtitles_cancel.cancel();
     e.session
         .get()
         .ok_or("La sesión ya no está activa")?
@@ -453,6 +524,119 @@ async fn stop_playback(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn read_subtitle_file(path: String) -> Result<SubtitleTrack, String> {
+    subtitles::read_local(PathBuf::from(path))
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn read_torrent_subtitle(
+    id: usize,
+    file_id: usize,
+    state: State<'_, AppState>,
+) -> Result<SubtitleTrack, String> {
+    engine(&state)
+        .await?
+        .read_torrent_subtitle(id, file_id)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn get_embedded_subtitles(
+    playback_url: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<embedded::EmbeddedTrack>, String> {
+    let e = engine(&state).await?;
+    let (input, cancel) = e
+        .media
+        .subtitle_source(&playback_url)
+        .await
+        .map_err(|e| e.to_string())?;
+    let probe = e.media.ffprobe_path().ok_or(
+        "FFprobe no está disponible. Reinicia con FFprobe instalado para buscar pistas integradas",
+    )?;
+    embedded::probe(probe, &input, cancel)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn start_embedded_subtitle(
+    playback_url: String,
+    track_id: usize,
+    request_id: String,
+    start_time: f64,
+    on_event: tauri::ipc::Channel<embedded::SubtitleEvent>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let e = engine(&state).await?;
+    let (input, source_cancel) = e
+        .media
+        .subtitle_source(&playback_url)
+        .await
+        .map_err(|e| e.to_string())?;
+    let ffmpeg = e
+        .media
+        .ffmpeg_path()
+        .ok_or("FFmpeg no está disponible")?
+        .to_path_buf();
+    let cancel = source_cancel.child_token();
+    let mut active = e.embedded_request.lock().await;
+    if source_cancel.is_cancelled() {
+        return Err("El video ya no está activo".into());
+    }
+    if let Some(previous) = active.take() {
+        previous.cancel.cancel();
+    }
+    *active = Some(EmbeddedRequest {
+        playback_url,
+        request_id,
+        cancel: cancel.clone(),
+    });
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = embedded::extract(
+            &ffmpeg,
+            &input,
+            track_id,
+            start_time,
+            cancel.clone(),
+            on_event.clone(),
+        )
+        .await
+        {
+            if !cancel.is_cancelled() {
+                let _ = on_event.send(embedded::SubtitleEvent::Error {
+                    message: format!("{error:#}"),
+                });
+            }
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_embedded_subtitle(
+    playback_url: String,
+    request_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if let Some(e) = state.engine.get() {
+        let mut active = e.embedded_request.lock().await;
+        if active
+            .as_ref()
+            .is_some_and(|r| r.playback_url == playback_url && r.request_id == request_id)
+        {
+            if let Some(request) = active.take() {
+                request.cancel.cancel();
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -471,7 +655,12 @@ pub fn run() {
             get_torrent_stats,
             remove_torrent,
             open_local_video,
-            stop_playback
+            stop_playback,
+            read_subtitle_file,
+            read_torrent_subtitle,
+            get_embedded_subtitles,
+            start_embedded_subtitle,
+            stop_embedded_subtitle
         ])
         .build(tauri::generate_context!())
         .expect("No se pudo iniciar Mukure");

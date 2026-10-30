@@ -18,6 +18,7 @@ export interface TorrentView {
   id: number;
   name: string;
   files: VideoFile[];
+  subtitles: VideoFile[];
   selectedFile: number | null;
 }
 
@@ -37,3 +38,27 @@ export interface Playback {
   mode: string;
   duration: number | null;
 }
+
+export interface SubtitleCue {
+  start: number;
+  end: number;
+  text: string;
+}
+
+export interface SubtitleTrack {
+  name: string;
+  cues: SubtitleCue[];
+}
+
+export interface EmbeddedSubtitleTrack {
+  id: number;
+  name: string;
+  language: string;
+  codec: string;
+  supported: boolean;
+}
+
+export type SubtitleEvent =
+  | { type: 'cues'; cues: SubtitleCue[] }
+  | { type: 'done' }
+  | { type: 'error'; message: string };

@@ -43,6 +43,7 @@ pub enum MediaSource {
 
 struct MediaEntry {
     id: String,
+    playback_url: String,
     source: MediaSource,
     mime: HeaderValue,
     cancel: CancellationToken,
@@ -54,6 +55,7 @@ struct Shared {
     origin: String,
     active: RwLock<Option<Arc<MediaEntry>>>,
     ffmpeg: Option<PathBuf>,
+    ffprobe: Option<PathBuf>,
     // A second request cancels its predecessor before acquiring this slot.
     // This also prevents two processes briefly overlapping when sources change.
     ffmpeg_slot: Arc<Mutex<()>>,
@@ -76,6 +78,7 @@ impl MediaServer {
             origin: format!("http://127.0.0.1:{}", address.port()),
             active: RwLock::new(None),
             ffmpeg: find_ffmpeg().await,
+            ffprobe: find_media_tool("ffprobe", "MUKURE_FFPROBE").await,
             ffmpeg_slot: Arc::new(Mutex::new(())),
             shutdown: CancellationToken::new(),
         });
@@ -101,6 +104,25 @@ impl MediaServer {
         self.shared.ffmpeg.as_deref()
     }
 
+    pub fn ffprobe_path(&self) -> Option<&Path> {
+        self.shared.ffprobe.as_deref()
+    }
+
+    pub async fn subtitle_source(&self, playback_url: &str) -> Result<(String, CancellationToken)> {
+        let active = self.shared.active.read().await;
+        let entry = active
+            .as_ref()
+            .filter(|entry| entry.playback_url == playback_url && !entry.cancel.is_cancelled())
+            .context("El video ya no está activo")?;
+        Ok((
+            format!(
+                "{}/{}/stream/{}",
+                self.shared.origin, self.shared.token, entry.id
+            ),
+            entry.cancel.child_token(),
+        ))
+    }
+
     pub async fn register(
         &self,
         source: MediaSource,
@@ -120,6 +142,7 @@ impl MediaServer {
         );
         *self.shared.active.write().await = Some(Arc::new(MediaEntry {
             id,
+            playback_url: url.clone(),
             source,
             mime,
             cancel: self.shared.shutdown.child_token(),
@@ -481,22 +504,26 @@ async fn transcode(
 }
 
 async fn find_ffmpeg() -> Option<PathBuf> {
+    find_media_tool("ffmpeg", "MUKURE_FFMPEG").await
+}
+
+async fn find_media_tool(tool: &str, variable: &str) -> Option<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(path) = std::env::var_os("MUKURE_FFMPEG") {
+    if let Some(path) = std::env::var_os(variable) {
         candidates.push(PathBuf::from(path));
     }
     if let Some(paths) = std::env::var_os("PATH") {
         candidates.extend(std::env::split_paths(&paths).map(|path| {
             path.join(if cfg!(windows) {
-                "ffmpeg.exe"
+                format!("{tool}.exe")
             } else {
-                "ffmpeg"
+                tool.to_owned()
             })
         }));
     }
     candidates.extend([
-        PathBuf::from("/opt/homebrew/bin/ffmpeg"),
-        PathBuf::from("/usr/local/bin/ffmpeg"),
+        PathBuf::from(format!("/opt/homebrew/bin/{tool}")),
+        PathBuf::from(format!("/usr/local/bin/{tool}")),
     ]);
     if let Ok(executable) = std::env::current_exe() {
         if let Some(directory) = executable.parent() {
@@ -504,10 +531,10 @@ async fn find_ffmpeg() -> Option<PathBuf> {
             // bundled resources in Contents/Resources. This works from Finder,
             // where Homebrew and developer-tool paths may be absent from PATH.
             if let Some(contents) = directory.parent() {
-                candidates.push(contents.join("Resources/bin/ffmpeg"));
+                candidates.push(contents.join(format!("Resources/bin/{tool}")));
             }
-            candidates.push(directory.join("bin/ffmpeg"));
-            candidates.push(directory.join("resources/bin/ffmpeg"));
+            candidates.push(directory.join(format!("bin/{tool}")));
+            candidates.push(directory.join(format!("resources/bin/{tool}")));
         }
     }
     if let Ok(directory) = std::env::current_dir() {
@@ -515,9 +542,9 @@ async fn find_ffmpeg() -> Option<PathBuf> {
             .into_iter()
             .flatten()
         {
-            candidates.push(root.join(".tools/bin/ffmpeg"));
-            candidates.push(root.join(".tools/ffmpeg"));
-            candidates.push(root.join("node_modules/ffmpeg-static/ffmpeg"));
+            candidates.push(root.join(format!(".tools/bin/{tool}")));
+            candidates.push(root.join(format!(".tools/{tool}")));
+            candidates.push(root.join(format!("node_modules/{tool}-static/{tool}")));
         }
     }
     for path in candidates {
@@ -598,6 +625,30 @@ fn resolve_range(header: Option<&str>, total: u64) -> Result<ResolvedRange, ()> 
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn subtitle_input_is_bound_to_current_playback_and_revoked_on_clear() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let server = super::MediaServer::start().await.unwrap();
+        let url = server
+            .register(
+                super::MediaSource::Local(file.path().to_owned()),
+                "video/mp4".into(),
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(server
+            .subtitle_source("http://example.com/video")
+            .await
+            .is_err());
+        let (input, cancel) = server.subtitle_source(&url).await.unwrap();
+        assert_eq!(input, url);
+        assert!(!cancel.is_cancelled());
+        server.clear().await;
+        assert!(cancel.is_cancelled());
+        assert!(server.subtitle_source(&url).await.is_err());
+        server.shutdown().await;
+    }
     use super::*;
     use tokio::io::AsyncWriteExt;
 
