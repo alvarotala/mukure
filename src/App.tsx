@@ -2,10 +2,16 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import {
-  Activity, ArrowDown, ArrowRight, ArrowUp, Check, ChevronRight, CircleHelp,
-  Clapperboard, FileVideo2, FolderOpen, HardDrive, Link2, LoaderCircle,
-  MonitorPlay, Play, Plus, Radio, ShieldCheck, Square, Users, X,
+  ArrowDown, ArrowUp, Captions, Cast, Check, CircleHelp, FileVideo2, FolderOpen,
+  KeyRound, Link2, ListVideo, LoaderCircle, Maximize2, MonitorPlay, Play,
+  Radio, Settings2, Square, Users, X,
 } from 'lucide-react';
+import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
+import PlayerControls from './PlayerControls';
+import CastPanel from './CastPanel';
+import { useCasting } from './useCasting';
+import { usePlayerChrome } from './usePlayerChrome';
+import ProviderSettings, { type ProviderStatus } from './ProviderSettings';
 import { errorMessage, fileName, formatBytes } from './format';
 import { attachCompatibleVideo } from './compatible';
 import SubtitleControls from './SubtitleControls';
@@ -26,8 +32,18 @@ function App() {
   const [statsError, setStatsError] = useState<string | null>(null);
   const [buffering, setBuffering] = useState(false);
   const [mediaReady, setMediaReady] = useState(false);
-  const [help, setHelp] = useState(false);
+  const [panel, setPanel] = useState<'open' | 'subtitles' | 'providers' | 'files' | 'help' | 'cast' | null>(null);
+  const [castSubtitle, setCastSubtitle] = useState<string | null>(null);
+  const [providers, setProviders] = useState<ProviderStatus[]>([]);
+  const [fullscreen, setFullscreen] = useState(false);
+  const chromeHidden = usePlayerChrome(fullscreen, Boolean(panel || busy || error));
+  const refreshProviders = useCallback(async () => {
+    if (!desktop) return;
+    const statuses = await invoke<ProviderStatus[]>('get_subtitle_providers');
+    setProviders(statuses);
+  }, []);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const casting = useCasting(videoRef, playback);
   const operation = useRef(0);
   const busyRef = useRef(false);
   const sourceTitle = playback?.name || torrent?.name || (localPath ? fileName(localPath) : null);
@@ -39,6 +55,7 @@ function App() {
   useEffect(() => {
     if (!desktop) return;
     let cancelled = false;
+    void refreshProviders().catch((reason: unknown) => setError(errorMessage(reason)));
     invoke<AppInfo>('get_app_info').then((data) => { if (!cancelled) setInfo(data); })
       .catch((reason: unknown) => { if (!cancelled) setError(errorMessage(reason)); });
     return () => { cancelled = true; };
@@ -125,6 +142,7 @@ function App() {
     if (!firstFile) throw new Error('Este torrent no contiene archivos de video compatibles con el selector.');
     await playTorrentFile(view, firstFile, mode, ticket);
     setMagnet('');
+    setPanel(null);
   }
 
   function submitMagnet(event: FormEvent) {
@@ -151,7 +169,7 @@ function App() {
       await clearSource();
       setLocalPath(path);
       const data = await invoke<Playback>('open_local_video', { path, mode });
-      if (operation.current === ticket) setPlayback(data);
+      if (operation.current === ticket) { setPlayback(data); setPanel(null); }
     });
   }
 
@@ -176,85 +194,53 @@ function App() {
       : 'No se pudo reproducir la salida de FFmpeg. Revisá que el archivo tenga video y que el torrent tenga peers disponibles.');
   }
 
+  async function resizeWindow(value: string) {
+    if (!desktop || !value) return;
+    const [width, height] = value.split('x').map(Number);
+    try {
+      const window = getCurrentWindow();
+      if (await window.isFullscreen()) await window.setFullscreen(false);
+      await window.setSize(new LogicalSize(width, height));
+    } catch (reason) { setError(errorMessage(reason)); }
+  }
+  const togglePanel = (next: typeof panel) => setPanel((current) => current === next ? null : next);
+
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <a className="brand" href="#" aria-label="Mukure, inicio" onClick={(event) => event.preventDefault()}>
-          <span className="brand-mark"><Play size={19} fill="currentColor" strokeWidth={0} /></span>
-          <span>MUKURE<span className="brand-dot">.</span></span>
-        </a>
-        <div className="sidebar-body">
-          <div className="section-label">TU ESPACIO</div>
-          <div className="nav-current"><MonitorPlay size={18} /><span>Reproductor</span><span className="nav-indicator" /></div>
-          <div className="library-heading"><span className="section-label">SESIÓN ACTUAL</span><span className="count">{hasSource ? '1' : '0'}</span></div>
-          {hasSource ? (
-            <div className="session-card">
-              <span className="session-icon"><FileVideo2 size={20} /></span>
-              <div><strong title={sourceTitle || ''}>{sourceTitle ? fileName(sourceTitle) : 'Preparando video'}</strong><span>{torrent ? 'Torrent · sesión local' : 'Archivo local'}</span></div>
-            </div>
-          ) : (
-            <div className="library-empty"><div className="library-empty-icon"><Clapperboard size={24} strokeWidth={1.4} /></div><p>Tu próxima película<br />empieza acá.</p><span>Agregá un enlace o un archivo.</span></div>
-          )}
-          {torrent && torrent.files.length > 0 && (
-            <div className="torrent-files">
-              <p className="section-label">ARCHIVOS DE VIDEO · {torrent.files.length}</p>
-              {torrent.files.map((file) => (
-                <button className={`file-button ${torrent.selectedFile === file.id ? 'selected' : ''}`} key={file.id} disabled={disabled} onClick={() => void run('Cargando video…', (ticket) => playTorrentFile(torrent, file, mode, ticket))} title={file.name}>
-                  {torrent.selectedFile === file.id ? <Play size={13} fill="currentColor" /> : <FileVideo2 size={14} />}
-                  <span><strong>{fileName(file.name)}</strong><small>{formatBytes(file.length)}</small></span>
-                </button>
-              ))}
-            </div>
-          )}
+    <div className={`app-shell${fullscreen ? ' is-fullscreen' : ''}${chromeHidden ? ' chrome-hidden' : ''}`}>
+      <header className="app-header" inert={chromeHidden}>
+        <div className="brand"><span className="brand-mark"><Play size={17} fill="currentColor" /></span><strong>mukure<span>.</span></strong></div>
+        <div className="now-playing"><span>{hasSource ? 'AHORA REPRODUCIENDO' : 'REPRODUCTOR DE VIDEO'}</span><strong title={sourceTitle || ''}>{sourceTitle ? fileName(sourceTitle) : 'Tu próxima historia empieza acá'}</strong></div>
+        <div className="header-actions">
+          <label className="window-size" title="Cambiar tamaño de la ventana"><Maximize2 size={16} /><select aria-label="Tamaño de ventana" value="" disabled={!desktop} onChange={(event) => void resizeWindow(event.target.value)}><option value="" disabled>Tamaño</option><option value="640x420">Compacta · 640 × 420</option><option value="960x640">Mediana · 960 × 640</option><option value="1280x800">Grande · 1280 × 800</option></select></label>
+          <button className={`header-button ${panel === 'open' ? 'active' : ''}`} onClick={() => togglePanel('open')} aria-label="Abrir video o torrent"><FolderOpen size={17} /><span>Abrir</span></button>
+          <button className={`icon-button ${panel === 'cast' || casting.status?.active ? 'active' : ''}`} title="Enviar a Chromecast" aria-label="Enviar a Chromecast" onClick={() => togglePanel('cast')}><Cast size={19} /></button>
+          <button className={`icon-button ${panel === 'providers' ? 'active' : ''}`} title="Fuentes de subtítulos" aria-label="Fuentes de subtítulos" onClick={() => togglePanel('providers')}><Settings2 size={18} /></button>
         </div>
-        <button className={`help-button ${help ? 'active' : ''}`} onClick={() => setHelp(!help)}><CircleHelp size={17} />Cómo funciona<ChevronRight size={15} /></button>
-        <div className="local-status"><span className="status-dot" /><div><strong>{desktop ? 'Todo en tu equipo' : 'Vista previa web'}</strong><span>{desktop ? `Mukure ${info?.version || '· escritorio'}` : 'La app funciona en escritorio'}</span></div><ShieldCheck size={18} /></div>
-      </aside>
-
-      <main className="main-content">
-        <header className="page-header">
-          <div><div className="eyebrow"><span /> TU CINE, SIN VUELTAS</div><h1>Le damos play<span>?</span></h1><p>Un enlace. Un video. Nada en el medio.</p></div>
-          <span className="local-badge"><ShieldCheck size={14} />100% local</span>
-        </header>
-
-        {!desktop && <div className="preview-notice"><MonitorPlay size={17} /><span>Vista previa · abrí la app de escritorio para reproducir videos y conectar torrents.</span></div>}
-
-        <section className="source-panel" aria-label="Abrir video">
-          <form className="magnet-form" onSubmit={submitMagnet}>
-            <Link2 size={20} className="input-icon" />
-            <input aria-label="Enlace magnet" placeholder="Pegá tu magnet link acá…" value={magnet} onChange={(event) => setMagnet(event.target.value)} disabled={disabled} spellCheck={false} autoComplete="off" />
-            <button className="primary-button" type="submit" disabled={disabled || !magnet.trim()}><Play size={14} fill="currentColor" />Reproducir<ArrowRight size={16} /></button>
-          </form>
-          <div className="source-actions"><span>o abrí un archivo</span><button onClick={pickTorrent} disabled={disabled}><Plus size={15} />Archivo .torrent</button><button onClick={pickVideo} disabled={disabled}><FolderOpen size={16} />Video local</button><span className="source-hint"><HardDrive size={13} />Sin cuentas. Sin nube.</span></div>
-        </section>
-
-        {error && <div className="error-notice" role="alert"><span>{error}</span><button aria-label="Cerrar error" onClick={() => setError(null)}><X size={16} /></button></div>}
-
+      </header>
+      {!desktop && <div className="preview-notice"><MonitorPlay size={15} />Vista previa. Abrí la app de escritorio para reproducir videos.</div>}
+      {error && <div className="error-notice" role="alert"><span>{error}</span><button className="icon-button" aria-label="Cerrar error" onClick={() => setError(null)}><X size={16} /></button></div>}
+      <main className={`player-workspace ${panel ? 'panel-open' : ''}`}>
         <section className="player-panel" aria-label="Reproductor de video">
-          <div className="player-toolbar"><div className="player-title"><span className={`tiny-dot ${hasSource ? 'is-active' : ''}`} /><span title={sourceTitle || ''}>{sourceTitle ? fileName(sourceTitle) : 'Listo para una nueva historia'}</span></div><div className="player-toolbar-right">{hasSource && <button className="stop-button" disabled={disabled} onClick={() => void run('Cerrando sesión…', async () => clearSource())}><Square size={12} />Cerrar</button>}<span className="player-tag">{torrent ? 'TORRENT' : localPath ? 'LOCAL' : 'PLAYER'}</span></div></div>
           <div className={`video-stage ${playback ? 'has-video' : ''}`}>
-            {playback ? (
-              <video key={playback.url} ref={videoRef} controls autoPlay playsInline preload="metadata" onWaiting={() => setBuffering(true)} onPlaying={() => { setBuffering(false); setMediaReady(true); }} onCanPlay={() => { setBuffering(false); setMediaReady(true); }} onLoadedMetadata={() => setMediaReady(true)} onError={playback.mode === 'compatible' ? undefined : mediaError} />
-            ) : (
-              <div className="empty-stage"><div className="stage-grid" /><div className="stage-orbit orbit-one" /><div className="stage-orbit orbit-two" /><div className="stage-glow" /><div className="empty-stage-content"><div className="stage-play"><Play size={28} fill="currentColor" strokeWidth={0} /></div><h2>{busy ? 'Preparando tu video' : 'La pantalla es tuya.'}</h2><p>{busy || 'Traé algo bueno para ver.'}</p>{!busy && <span>MAGNET LINKS <i /> TORRENTS <i /> ARCHIVOS LOCALES</span>}</div><div className="stage-bottom"><span>MUKURE ORIGINAL PLAYER</span><span>PRESS PLAY. STAY LOCAL.</span></div></div>
-            )}
-            {playback && (busy || (buffering && !mediaReady)) && <div className="video-loading" role="status"><LoaderCircle className="spin" size={26} /><span>{busy || 'Esperando datos del video…'}</span></div>}
-            {!playback && busy && <span className="stage-loading"><LoaderCircle className="spin" size={18} /></span>}
+            {playback ? <video style={casting.status?.active ? { visibility: 'hidden' } : undefined} key={playback.url} ref={videoRef} autoPlay playsInline preload="metadata" onClick={() => { const video = videoRef.current; if (video) { if (video.paused) void video.play().catch((reason: unknown) => setError(errorMessage(reason))); else video.pause(); } }} onWaiting={() => setBuffering(true)} onPlaying={() => { setBuffering(false); setMediaReady(true); }} onCanPlay={() => { setBuffering(false); setMediaReady(true); }} onLoadedMetadata={() => setMediaReady(true)} onError={playback.mode === 'compatible' ? undefined : mediaError} /> :
+              <div className="empty-stage"><div className="empty-stage-content"><div className="stage-play">{busy ? <LoaderCircle size={32} className="spin" /> : <Play size={34} fill="currentColor" strokeWidth={1} />}</div><span className="eyebrow">TU CINE, A TU MANERA</span><h1>{busy ? 'Preparando tu video…' : 'Todo listo para darle play.'}</h1><p>{busy || 'Un archivo, un torrent o un magnet. Vos elegís.'}</p>{!busy && <div className="empty-actions"><button className="accent-button" onClick={pickVideo} disabled={disabled}><FolderOpen size={17} />Abrir video</button><button className="secondary-button" onClick={() => setPanel('open')}><Link2 size={16} />Magnet o torrent</button></div>}</div></div>}
+            {playback && (busy || (buffering && !mediaReady)) && <div className="video-loading" role="status"><LoaderCircle className="spin" size={30} /><span>{busy || 'Esperando datos del video…'}</span></div>}
+            {casting.status?.active && <div className="cast-stage"><Cast size={46} /><strong>{casting.status.deviceName}</strong><span>{casting.status.playerState === 'CONNECTING' ? 'Preparando transmisión…' : 'Reproduciendo en tu TV'}</span><button className="secondary-button" onClick={() => setPanel('cast')}>Ver transmisión</button></div>}
           </div>
-          <div className="player-footer"><span><span className={`status-dot ${playback ? '' : 'muted'}`} />{busy ? 'Preparando' : playback ? (buffering ? 'Cargando datos' : 'Video abierto') : 'Esperando un video'}</span><span><MonitorPlay size={14} />{mode === 'direct' ? 'Reproducción directa' : 'Compatibilidad FFmpeg'}</span></div>
+          <PlayerControls videoRef={videoRef} playback={playback} onSubtitles={() => togglePanel('subtitles')} subtitlesOpen={panel === 'subtitles'} onError={setError} onFullscreenChange={setFullscreen} hidden={chromeHidden} cast={casting.status} onCastControl={casting.control} />
         </section>
-
-        <section className="below-player">
-          <div className="playback-mode"><div className="mode-heading"><Activity size={17} /><div><strong>A tu ritmo, a tu manera.</strong><p>{mode === 'direct' ? 'Usá el decodificador del sistema, sin convertir el video.' : 'FFmpeg convierte a H.264 y AAC mientras reproduce. Puede usar más CPU.'}</p></div></div><div className="segmented-control" aria-label="Modo de reproducción"><button className={mode === 'direct' ? 'selected' : ''} aria-pressed={mode === 'direct'} disabled={disabled} onClick={() => changeMode('direct')}>{mode === 'direct' && <Check size={13} />}Directo</button><button className={mode === 'compatible' ? 'selected' : ''} aria-pressed={mode === 'compatible'} disabled={disabled || !info?.ffmpegAvailable} title={info?.ffmpegAvailable ? 'Convertir con FFmpeg' : 'FFmpeg no está disponible en esta instalación'} onClick={() => changeMode('compatible')}>{mode === 'compatible' && <Check size={13} />}FFmpeg</button></div></div>
-          {mode === 'compatible' && <p className="compat-note">La conversión empieza desde cero. Adelantar y retroceder todavía no están disponibles en este modo.</p>}
-          <SubtitleControls key={localPath ? `local:${localPath}` : torrent ? `torrent:${torrent.id}:${torrent.selectedFile}` : 'empty'} videoRef={videoRef} playback={playback} torrentId={torrent?.id} files={torrent?.subtitles || []} disabled={disabled} />
-          {torrent && <div className="transfer-panel"><div className="transfer-top"><span><Radio size={14} />{stats?.finished ? 'Descarga completa · compartiendo' : stats?.state || 'Conectando con peers'}</span><strong>{progress.toLocaleString('es', { maximumFractionDigits: 1 })}%</strong></div><div className="progress-track"><div style={{ width: `${progress}%` }} /></div><div className="transfer-details"><span><ArrowDown size={13} />{formatBytes(stats?.downloadSpeed || 0)}/s</span><span><ArrowUp size={13} />{formatBytes(stats?.uploadSpeed || 0)}/s</span><span><Users size={13} />{stats?.peers || 0} peers</span><span>{formatBytes(stats?.progressBytes || 0)} / {formatBytes(stats?.totalBytes || 0)}</span></div>{statsError && <p className="stats-error">No se pudo actualizar el estado: {statsError}</p>}</div>}
-        </section>
-
-        {help && <section className="help-panel" aria-label="Cómo funciona"><div className="help-heading"><h2>Simple por fuera. Local por dentro.</h2><button aria-label="Cerrar ayuda" onClick={() => setHelp(false)}><X size={17} /></button></div><div className="help-grid"><div><Link2 size={19} /><h3>Conectá tu video</h3><p>Pegá un magnet, abrí un .torrent o elegí un archivo local. El torrent necesita peers disponibles para descargar.</p></div><div><MonitorPlay size={19} /><h3>Miralo mientras llega</h3><p>Elegí un archivo de video en la sesión. Los datos se descargan a tu equipo y se entregan al player por un puerto local.</p></div><div><ShieldCheck size={19} /><h3>Vos tenés el control</h3><p>No hay cuentas ni servidor remoto. Los torrents comparten datos con otros peers. Al cerrar la sesión se detiene la conexión.</p></div></div><div className="cache-info"><HardDrive size={14} /><span>Carpeta de datos: <code>{info?.cacheDir || 'Disponible al abrir la app de escritorio'}</code></span></div>{!info?.ffmpegAvailable && <p className="ffmpeg-help">El modo FFmpeg se habilita cuando la app encuentra el ejecutable FFmpeg. La reproducción directa depende de los formatos que soporte el sistema.</p>}</section>}
-
-        <footer className="page-footer"><span>Menos plataforma. Más película.</span><span>Hecho para darle play <Play size={10} fill="currentColor" /></span></footer>
+        <aside className="drawer" hidden={!panel} aria-label="Opciones del reproductor">
+          <div className="drawer-header"><div className="drawer-tabs"><button aria-label="Panel de Chromecast" title="Chromecast" className={panel === 'cast' ? 'active' : ''} onClick={() => setPanel('cast')}><Cast size={18} /></button><button aria-label="Panel de subtítulos" title="Subtítulos" className={panel === 'subtitles' ? 'active' : ''} onClick={() => setPanel('subtitles')}><Captions size={19} /></button><button aria-label="Panel de fuentes" title="Fuentes" className={panel === 'providers' ? 'active' : ''} onClick={() => setPanel('providers')}><KeyRound size={18} /></button><button aria-label="Archivos de la sesión" title="Archivos" className={panel === 'files' ? 'active' : ''} onClick={() => setPanel('files')}><ListVideo size={19} /></button><button aria-label="Ayuda del reproductor" title="Ayuda" className={panel === 'help' ? 'active' : ''} onClick={() => setPanel('help')}><CircleHelp size={18} /></button></div><button className="icon-button" aria-label="Cerrar panel" onClick={() => setPanel(null)}><X size={18} /></button></div>
+          <div className="drawer-content"><div hidden={panel !== 'cast'}><CastPanel visible={panel === 'cast'} playback={playback} casting={casting} subtitle={castSubtitle} ffmpegAvailable={Boolean(info?.ffmpegAvailable)} /></div>
+            <section hidden={panel !== 'open'} className="open-panel" aria-label="Abrir video"><div className="panel-heading"><FolderOpen size={20} /><div><h2>Abrir un video</h2><p>De tu equipo o desde un torrent.</p></div></div><button className="source-file-button" onClick={pickVideo} disabled={disabled}><FileVideo2 size={22} /><span><strong>Video local</strong><small>Elegí un archivo de tu equipo</small></span></button><button className="source-file-button" onClick={pickTorrent} disabled={disabled}><Radio size={22} /><span><strong>Archivo .torrent</strong><small>Reproducí mientras se descarga</small></span></button><form className="magnet-form" onSubmit={submitMagnet}><label htmlFor="magnet">O pegá un enlace magnet</label><textarea id="magnet" aria-label="Enlace magnet" placeholder="magnet:?xt=urn:btih:…" value={magnet} onChange={(event) => setMagnet(event.target.value)} disabled={disabled} spellCheck={false} /><button className="accent-button" type="submit" disabled={disabled || !magnet.trim()}><Play size={15} fill="currentColor" />Reproducir enlace</button></form></section>
+            <div hidden={panel !== 'subtitles'}><SubtitleControls key={localPath ? `local:${localPath}` : torrent ? `torrent:${torrent.id}:${torrent.selectedFile}` : 'empty'} videoRef={videoRef} playback={playback} torrentId={torrent?.id} files={torrent?.subtitles || []} localPath={localPath} providers={providers.filter((p) => p.connected).map((p) => p.id)} onProviders={() => setPanel('providers')} onCastSubtitle={setCastSubtitle} disabled={disabled} /></div>
+            <div hidden={panel !== 'providers'}><ProviderSettings statuses={providers} disabled={!desktop} onChange={refreshProviders} /></div>
+            <section hidden={panel !== 'files'}><div className="panel-heading"><ListVideo size={20} /><div><h2>Sesión actual</h2><p>{hasSource ? torrent ? 'Elegí el video que querés reproducir.' : 'Video abierto desde tu equipo.' : 'Todavía no hay un video abierto.'}</p></div></div>{localPath && <div className="session-card"><FileVideo2 size={20} /><span>{fileName(localPath)}</span></div>}{torrent?.files.map((file) => <button className={`file-button ${torrent.selectedFile === file.id ? 'selected' : ''}`} key={file.id} disabled={disabled} onClick={() => void run('Cargando video…', (ticket) => playTorrentFile(torrent, file, mode, ticket))}><FileVideo2 size={18} /><span><strong>{fileName(file.name)}</strong><small>{formatBytes(file.length)}</small></span>{torrent.selectedFile === file.id && <Check size={15} />}</button>)}{torrent && <div className="transfer-panel"><div className="transfer-top"><span>{stats?.finished ? 'Descarga completa' : 'Descargando'}</span><strong>{progress.toFixed(1)}%</strong></div><div className="progress-track"><div style={{ width: `${progress}%` }} /></div><div className="transfer-details"><span><ArrowDown size={13} />{formatBytes(stats?.downloadSpeed || 0)}/s</span><span><ArrowUp size={13} />{formatBytes(stats?.uploadSpeed || 0)}/s</span><span><Users size={13} />{stats?.peers || 0} peers</span><span>{formatBytes(stats?.progressBytes || 0)} / {formatBytes(stats?.totalBytes || 0)}</span></div>{statsError && <p className="inline-error">{statsError}</p>}</div>}{hasSource && <button className="secondary-button close-session" disabled={disabled} onClick={() => void run('Cerrando sesión…', async () => clearSource())}><Square size={14} />Cerrar video y detener sesión</button>}</section>
+            <section hidden={panel !== 'help'} className="help-panel"><div className="panel-heading"><CircleHelp size={20} /><div><h2>Acomodá tu reproductor</h2><p>El video ocupa el espacio disponible.</p></div></div><p>En pantalla completa, las barras y el cursor se ocultan tras 3 segundos de inactividad. Mové el mouse o usá el teclado para mostrarlos.</p><p>Arrastrá cualquier borde de la ventana para cambiar su tamaño, o elegí un tamaño desde la barra superior.</p><dl className="shortcuts"><div><dt>Reproducir / pausar</dt><dd>Espacio</dd></div><div><dt>Saltar 10 segundos</dt><dd>← / →</dd></div><div><dt>Silenciar</dt><dd>M</dd></div><div><dt>Pantalla completa</dt><dd>F</dd></div></dl><p>Los subtítulos se buscan automáticamente al abrir un video. En el botón CC podés elegir una pista, cambiar el idioma y ajustar la sincronización.</p><p>Directo usa los formatos que admite tu equipo. FFmpeg convierte formatos adicionales; todavía no permite saltos y puede consumir más CPU.</p><p>Los torrents necesitan peers disponibles y también comparten piezas. Al cerrar la sesión se borran sus datos descargados.</p><p className="cache-info">Carpeta de datos:<br /><code>{info?.cacheDir || 'Disponible en la app de escritorio'}</code></p></section>
+          </div>
+        </aside>
       </main>
+      <footer className="status-bar" inert={chromeHidden}><span className="playback-status"><span className={`status-dot ${playback ? 'is-active' : ''}`} />{busy ? 'Preparando…' : playback ? buffering ? 'Cargando datos…' : torrent ? 'Torrent' : 'Archivo local' : 'Listo para reproducir'}</span>{torrent && <button className="transfer-summary" onClick={() => setPanel('files')}><ArrowDown size={12} />{formatBytes(stats?.downloadSpeed || 0)}/s · {stats?.peers || 0} peers</button>}<div className="segmented-control" aria-label="Modo de reproducción"><button className={mode === 'direct' ? 'selected' : ''} aria-pressed={mode === 'direct'} disabled={disabled || Boolean(casting.status?.active)} onClick={() => changeMode('direct')}>Directo</button><button className={mode === 'compatible' ? 'selected' : ''} aria-pressed={mode === 'compatible'} disabled={disabled || Boolean(casting.status?.active) || !info?.ffmpegAvailable} title={info?.ffmpegAvailable ? 'Convertir con FFmpeg · sin saltos' : 'FFmpeg no disponible'} onClick={() => changeMode('compatible')}>FFmpeg</button></div></footer>
     </div>
   );
 }

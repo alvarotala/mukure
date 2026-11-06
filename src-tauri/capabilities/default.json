@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Local desktop window and file selection",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open"]
+  "permissions": ["core:default", "dialog:allow-open", "core:window:allow-set-size", "core:window:allow-set-fullscreen", "core:window:allow-is-fullscreen"]
 }

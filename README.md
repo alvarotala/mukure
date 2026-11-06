@@ -34,7 +34,7 @@ pnpm test:rust
 
 Verificado en esta Mac: compilación de la interfaz y del `.app`, pruebas de HTTP Range y CORS, transferencias BitTorrent reales con `.torrent` y magnet entre dos clientes locales, lectura antes de completar la descarga, seek y limpieza. En la app nativa se reprodujeron un MP4 local, un magnet y un `.torrent` de prueba en modo directo y/o FFmpeg, y un MKV con pista de audio mediante FFmpeg. Son archivos sintéticos propios; no se probó disponibilidad o rendimiento de torrents públicos ni películas largas.
 
-Subtítulos: 24 pruebas Rust y 4 de frontend pasan, incluyendo lectura de SRT desde un peer real, cancelación sin peers, extracción integrada y conservación de tiempos al adelantar. La revisión nativa verificó SRT externo y MP4 timed text integrado en reproducción directa y FFmpeg, mostrar/ocultar, ajuste y conservación de la selección al cambiar de modo.
+Las pruebas de subtítulos cubren lectura de SRT desde un peer real, cancelación sin peers, extracción integrada y conservación de tiempos al adelantar. La revisión nativa verificó SRT externo y MP4 timed text integrado en reproducción directa y FFmpeg, mostrar/ocultar, ajuste y conservación de la selección al cambiar de modo.
 
 ## Uso
 
@@ -43,29 +43,44 @@ Subtítulos: 24 pruebas Rust y 4 de frontend pasan, incluyendo lectura de SRT de
 3. Usa **Directo** si tu sistema admite el formato; prueba **FFmpeg** si no lo reproduce.
 4. Detén la sesión para desconectar el torrent y borrar sus datos descargados.
 
-También puedes abrir un video del disco para probar el reproductor sin depender de la disponibilidad de peers. Sólo se mantiene un torrent activo por vez.
+También puedes abrir un video del disco sin depender de la disponibilidad de peers. Sólo se mantiene un torrent activo por vez. La ventana permite redimensionar desde sus bordes o elegir un tamaño en la barra superior. En pantalla completa, las barras y el cursor se ocultan después de 3 segundos de inactividad; vuelven al mover el mouse o usar el teclado. Los paneles abiertos mantienen visibles los controles.
 
 ## Subtítulos
 
 Con un video abierto, el panel **Subtítulos** permite:
 
 - Abrir un `.srt` o `.vtt` local, o elegir uno incluido en el torrent sin descargar todos sus archivos.
-- Pulsar **Buscar pistas integradas** para detectar los idiomas y elegir una pista de texto dentro del video. FFprobe obtiene la lista y FFmpeg entrega los subtítulos progresivamente, tanto en reproducción directa como en el modo FFmpeg.
+- Encontrar automáticamente pistas integradas y archivos de subtítulos en la misma carpeta del video. FFprobe obtiene la lista y FFmpeg entrega las pistas de texto progresivamente, tanto en reproducción directa como en el modo FFmpeg.
+- Buscar en paralelo en OpenSubtitles (addon público de Stremio) y SubtitleDB sin cuenta. Puedes cambiar idioma, corregir el título o desactivar la búsqueda online.
+- Agregar SubDL y Wyzie desde **Fuentes de subtítulos**. El panel incluye enlaces oficiales para obtener claves gratuitas, probarlas, conectarlas y desconectarlas. Las claves se guardan en el Llavero de macOS, no en el almacenamiento del navegador. Los servicios externos pueden cambiar sus límites o disponibilidad.
 - Mostrar u ocultar la pista y ajustar su sincronización hasta ±60 segundos. Un valor positivo retrasa el texto.
 
 La selección se conserva al cambiar el modo de reproducción y se limpia al cambiar de video. En reproducción directa, los saltos reinician la extracción integrada cerca de la nueva posición, conservando sus marcas de tiempo. La disponibilidad de piezas y el índice del contenedor pueden demorar las pistas de un torrent.
 
 Los archivos externos admiten UTF-8, UTF-16 con BOM y Windows-1252, hasta 5 MiB. Las pistas integradas de texto incluyen SRT, ASS/SSA y MP4 timed text; la conversión conserva el texto y formato básico, no los estilos y posiciones avanzadas de ASS/WebVTT. Los subtítulos de imagen (PGS/DVD/DVB) se identifican, pero todavía no se reproducen.
 
+## Chromecast
+
+1. Conecta esta Mac y el Chromecast a la misma red y abre un video.
+2. Si quieres subtítulos, selecciona una pista externa en **CC** antes de transmitir.
+3. Pulsa el icono **Enviar a Chromecast** en la barra superior y elige un dispositivo. También puedes ingresar su IP local si no aparece en la búsqueda.
+4. Usa los controles de Mukure para pausar, continuar, ajustar volumen y, en envío directo, cambiar de posición. **Detener transmisión** deja el video pausado en la Mac.
+
+El envío directo entrega el archivo original desde la posición actual; los formatos y codecs compatibles dependen del receptor. **Convertir para TV** usa FFmpeg para H.264/AAC hasta 1080p mediante HLS: empieza desde cero y no permite saltos. La app debe permanecer abierta. Los subtítulos externos se envían como una copia WebVTT con el ajuste seleccionado; cambios posteriores requieren reiniciar la transmisión. Las pistas integradas siguen disponibles sólo en la Mac.
+
+La búsqueda usa mDNS en IPv4. Si no aparecen dispositivos, revisa el permiso de red local de macOS, el firewall y posibles VPN o redes de invitados. Sólo durante la transmisión se abre un servidor HTTP en la interfaz local, restringido al IP del receptor y a un token aleatorio. Detener o cambiar el video revoca ese acceso y cancela la conversión.
+
+Las comprobaciones locales cubren una sesión Cast simulada sobre TLS (inicio, heartbeat, carga, pausa, salto, detención y errores), entrega HTTP con rangos, acceso restringido, WebVTT y conversión HLS real. La reproducción en un Chromecast físico queda pendiente de prueba.
+
 ## Qué ocurre en tu equipo
 
 - **Interfaz:** React dentro del WebView del sistema; los comandos Tauri conectan la interfaz con Rust.
 - **BitTorrent:** `librqbit 9.0.1` embebido. Sus lectores priorizan las piezas cercanas al cursor y esperan datos verificados antes de entregarlos. Un salto temporal solicita los rangos correspondientes.
-- **Transporte del video:** un listener HTTP interno en `127.0.0.1`, con puerto aleatorio y token por ejecución. Sólo entrega el video seleccionado; no requiere iniciar un servicio aparte ni expone una API de control en la red local.
+- **Transporte del video:** un listener HTTP interno en `127.0.0.1`, con puerto aleatorio y token por ejecución. Sólo entrega el video seleccionado; no requiere iniciar un servicio aparte. Chromecast agrega temporalmente el acceso local descrito arriba; no expone una API de control en la red.
 - **Decodificación directa:** el elemento de video del WebView usa los codecs disponibles en el sistema. El transporte admite peticiones HTTP Range; los saltos temporales dependen también del formato y del WebView.
 - **Compatibilidad FFmpeg:** un proceso local convierte a H.264 y AAC dentro de MP4 fragmentado. La interfaz lo incorpora mediante MediaSource, con un buffer de aproximadamente 30 segundos por delante y 30 por detrás; la descarga HTTP se cancela al cerrar el video. La conversión empieza desde el inicio y **este prototipo no implementa seeking arbitrario en ese modo**. Puede consumir bastante más CPU.
 
-No hay login, cuentas ni backend remoto de Mukure. No se agregó telemetría a la aplicación. **BitTorrent sí usa Internet:** conecta con peers, trackers y DHT, y puede subir piezas a otros peers; local no significa anónimo ni desconectado. Reproducir archivos locales y sus subtítulos no requiere esas conexiones.
+No hay login, cuentas ni backend remoto de Mukure. No se agregó telemetría a la aplicación. **BitTorrent sí usa Internet:** conecta con peers, trackers y DHT, y puede subir piezas a otros peers; local no significa anónimo ni desconectado. La búsqueda online de subtítulos también usa Internet: envía el nombre/título del video y el idioma a los proveedores y puede resolver su identificador IMDb. Puedes desactivarla en CC para usar únicamente subtítulos locales o integrados. El video local no se sube a esos servicios.
 
 Los datos del torrent se guardan bajo el directorio de caché de la aplicación, en `sessions/session-*`; la ruta exacta aparece en la ayuda. La caché puede crecer hasta el tamaño del video. Detener el torrent borra sus datos y un cierre limpio elimina la caché de esa ejecución. Un cierre forzado o un crash puede dejar archivos residuales. El video local original no se borra.
 

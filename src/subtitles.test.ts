@@ -64,3 +64,11 @@ test('native track replacement clears disabled cues, reuses one track and ignore
   assert.equal(stored.length, 0);
   assert.equal(track.mode, 'disabled');
 });
+
+
+test('Cast subtitles preserve delayed timing, multiline text and clip negative offsets', async () => {
+  const { subtitleWebVtt } = await import('./subtitles.ts');
+  const track = { name: 'Español', cues: [{ start: 1, end: 2, text: 'Hola\nMundo' }] };
+  assert.match(subtitleWebVtt(track, 1.5), /00:00:02\.500 --> 00:00:03\.500\nHola\nMundo/);
+  assert.match(subtitleWebVtt(track, -1.5), /00:00:00\.000 --> 00:00:00\.500/);
+});

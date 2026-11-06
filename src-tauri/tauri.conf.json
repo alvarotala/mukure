@@ -12,11 +12,13 @@
   "app": {
     "windows": [{
       "title": "Mukure",
-      "width": 1280,
-      "height": 850,
-      "minWidth": 920,
-      "minHeight": 640,
-      "backgroundColor": "#111311"
+      "width": 1120,
+      "height": 740,
+      "minWidth": 480,
+      "minHeight": 360,
+      "resizable": true,
+      "maximizable": true,
+      "backgroundColor": "#101210"
     }],
     "security": {
       "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost http://127.0.0.1:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; media-src 'self' http://127.0.0.1:* blob:; script-src 'self'"

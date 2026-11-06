@@ -77,3 +77,13 @@ export function attachSubtitles(video: HTMLVideoElement, subtitles: SubtitleTrac
   renderer.append(subtitles.cues);
   return renderer.detach;
 }
+
+/** A snapshot for the Cast receiver, with the same timing adjustment as the Mac. */
+export function subtitleWebVtt(track: SubtitleTrack, offset: number): string {
+  const timestamp = (seconds: number) => {
+    const ms = Math.round(seconds * 1000);
+    return `${String(Math.floor(ms / 3600000)).padStart(2, '0')}:${String(Math.floor(ms / 60000) % 60).padStart(2, '0')}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}`;
+  };
+  return 'WEBVTT\n\n' + shiftedCues(track.cues, offset).map((cue, index) =>
+    `${index + 1}\n${timestamp(cue.start)} --> ${timestamp(cue.end)}\n${cue.text.replace(/\n{2,}/g, '\n')}\n`).join('\n');
+}

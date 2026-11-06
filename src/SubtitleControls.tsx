@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Captions, FolderOpen, LoaderCircle, Search, X } from 'lucide-react';
-import { createSubtitleRenderer, type SubtitleRenderer } from './subtitles';
+import { Captions, Download, FolderOpen, Globe, LoaderCircle, Search, Settings2, X } from 'lucide-react';
+import { createSubtitleRenderer, subtitleWebVtt, type SubtitleRenderer } from './subtitles';
 import { errorMessage, fileName } from './format';
-import type { EmbeddedSubtitleTrack, Playback, SubtitleEvent, SubtitleTrack, VideoFile } from './types';
+import type { EmbeddedSubtitleTrack, OnlineSubtitle, Playback, SubtitleEvent, SubtitleSearchResult, SubtitleTrack, VideoFile } from './types';
 
 interface Props {
   videoRef: RefObject<HTMLVideoElement | null>;
@@ -12,9 +12,13 @@ interface Props {
   torrentId: number | undefined;
   files: VideoFile[];
   disabled: boolean;
+  localPath: string | null;
+  providers: string[];
+  onProviders: () => void;
+  onCastSubtitle: (subtitle: string | null) => void;
 }
 
-export default function SubtitleControls({ videoRef, playback, torrentId, files, disabled }: Props) {
+export default function SubtitleControls({ videoRef, playback, torrentId, files, disabled, localPath, providers, onProviders, onCastSubtitle }: Props) {
   const [subtitles, setSubtitles] = useState<SubtitleTrack | null>(null);
   const [subtitleIdentity, setSubtitleIdentity] = useState('');
   const [enabled, setEnabled] = useState(true);
@@ -38,6 +42,71 @@ export default function SubtitleControls({ videoRef, playback, torrentId, files,
   const previousOffset = useRef(offset);
   const loadingRef = useRef(false);
   const unavailable = disabled || !playback;
+  const [online, setOnline] = useState(() => localStorage.getItem('mukure.subtitle.online') !== 'false');
+  const [language, setLanguage] = useState(() => localStorage.getItem('mukure.subtitle.language') || 'es');
+  const [query, setQuery] = useState('');
+  const [submittedQuery, setSubmittedQuery] = useState('');
+  const [retry, setRetry] = useState(0);
+  const [results, setResults] = useState<Record<string, OnlineSubtitle[]>>({});
+  const [sources, setSources] = useState<Record<string, string>>({});
+  const [nearby, setNearby] = useState<{ name: string; path: string }[]>([]);
+  const providerList = ['opensubtitles', 'subtitledb', ...providers].join(',');
+
+  useEffect(() => { localStorage.setItem('mukure.subtitle.online', String(online)); }, [online]);
+  useEffect(() => { localStorage.setItem('mukure.subtitle.language', language); }, [language]);
+  useEffect(() => { if (playback && !query) setQuery(fileName(playback.name)); }, [playback?.name]);
+
+  useEffect(() => {
+    if (!playback || disabled) return;
+    // Delay one tick so StrictMode's setup/cleanup does not launch two probes.
+    const timer = setTimeout(() => void findEmbeddedTracks(), 200);
+    return () => clearTimeout(timer);
+  }, [playback?.url, disabled]);
+
+  useEffect(() => {
+    if (!localPath || disabled) return;
+    let cancelled = false;
+    invoke<{ name: string; path: string }[]>('find_local_subtitles', { path: localPath })
+      .then((items) => { if (!cancelled) setNearby(items); })
+      .catch((reason: unknown) => { if (!cancelled) setError(errorMessage(reason)); });
+    return () => { cancelled = true; };
+  }, [localPath, disabled]);
+
+  useEffect(() => {
+    setResults({}); setSources({});
+    if (!playback || disabled || !online) return;
+    let cancelled = false;
+    const ids = providerList.split(',');
+    const timer = setTimeout(() => {
+      setSources(Object.fromEntries(ids.map((id) => [id, 'Buscando…'])));
+      for (const id of ids) {
+        invoke<SubtitleSearchResult>('search_online_subtitles', {
+          playbackUrl: playback.url, provider: id, query: submittedQuery || fileName(playback.name), language,
+        }).then((data) => {
+          if (cancelled) return;
+          setResults((old) => ({ ...old, [id]: data.subtitles }));
+          setSources((old) => ({ ...old, [id]: data.subtitles.length ? `${data.subtitles.length} encontrados` : 'Sin resultados en este idioma' }));
+        }).catch((reason: unknown) => {
+          if (!cancelled) setSources((old) => ({ ...old, [id]: errorMessage(reason) }));
+        });
+      }
+    }, 350);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [playback?.url, disabled, online, language, submittedQuery, retry, providerList]);
+
+  function pickOnline(track: OnlineSubtitle) {
+    if (!playback) return;
+    void load(`Descargando desde ${track.provider}…`, async () => ({
+      track: await invoke<SubtitleTrack>('download_online_subtitle', { playbackUrl: playback.url, url: track.url, name: track.name }),
+      selection: track.id,
+    }));
+  }
+
+
+  useEffect(() => {
+    onCastSubtitle(subtitles?.cues.length && enabled && !embeddedChoice ? subtitleWebVtt(subtitles, offset) : null);
+  }, [subtitles, enabled, offset, embeddedChoice, onCastSubtitle]);
+  useEffect(() => () => onCastSubtitle(null), [onCastSubtitle]);
 
   function updateSubtitles(track: SubtitleTrack, id: string) {
     subtitlesRef.current = track;
@@ -218,9 +287,19 @@ export default function SubtitleControls({ videoRef, playback, torrentId, files,
 
   return (
     <section className="subtitle-panel" aria-label="Subtítulos">
-      <div className="subtitle-heading"><Captions size={18} /><div><strong>Subtítulos</strong><p>Archivos .srt, .vtt y pistas de texto integradas en el video.</p></div></div>
+      <div className="subtitle-heading"><Captions size={18} /><div><strong>Subtítulos</strong><p>Búsqueda automática en tus archivos y en Internet.</p></div></div>
+      <div className="online-subtitle-options">
+        <label className="subtitle-toggle"><input type="checkbox" checked={online} onChange={(event) => setOnline(event.target.checked)} />Buscar en Internet automáticamente</label>
+        <select aria-label="Idioma de subtítulos" value={language} onChange={(event) => setLanguage(event.target.value)}>{[['es', 'Español'], ['en', 'English'], ['pt', 'Português'], ['fr', 'Français'], ['it', 'Italiano'], ['de', 'Deutsch']].map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select>
+        <button className="subtitle-open" onClick={onProviders}><Settings2 size={14} />Conectar fuentes</button>
+      </div>
+      {online && <form className="subtitle-search" onSubmit={(event) => { event.preventDefault(); setSubmittedQuery(query.trim()); setRetry((n) => n + 1); }}><Search size={15} /><input aria-label="Título para buscar subtítulos" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Título y año, o IMDb · series: S01E01" /><button className="subtitle-open" disabled={unavailable || !query.trim()} type="submit">Buscar</button></form>}
+      {online && <p className="subtitle-hint">Se consulta el nombre del video; el archivo y su ruta local permanecen en tu equipo. Podés corregir el título arriba.</p>}
+      {Object.keys(sources).length > 0 && <div className="subtitle-sources" aria-live="polite">{Object.entries(sources).map(([id, status]) => <div key={id}>{status === 'Buscando…' ? <LoaderCircle size={12} className="spin" /> : <Globe size={12} />}<strong>{{ opensubtitles: 'OpenSubtitles', subtitledb: 'SubtitleDB', subdl: 'SubDL', wyzie: 'Wyzie' }[id]}</strong><span>{status}</span></div>)}</div>}
+      {Object.values(results).some((items) => items.length > 0) && <div className="online-results">{Object.values(results).flat().map((track) => <button key={track.id} className={`subtitle-result ${selection === track.id ? 'selected' : ''}`} disabled={unavailable || Boolean(loading)} onClick={() => pickOnline(track)}><span><strong>{track.name || 'Subtítulos'}</strong><small>{track.provider} · {track.language.toUpperCase()}</small></span>{selection === track.id ? <Captions size={17} /> : <Download size={16} />}</button>)}</div>}
       <div className="subtitle-actions">
         <button className="subtitle-open" onClick={pickFile} disabled={unavailable || Boolean(loading)}><FolderOpen size={14} />Abrir subtítulos</button>
+        {nearby.length > 0 && <select aria-label="Subtítulos junto al video" value={selection.startsWith('sidecar:') ? selection.slice(8) : ''} disabled={unavailable || Boolean(loading)} onChange={(event) => { const path = event.target.value; if (path) void load('Abriendo subtítulos…', async () => ({ track: await invoke<SubtitleTrack>('read_subtitle_file', { path }), selection: `sidecar:${path}` })); }}><option value="">En la carpeta del video…</option>{nearby.map((file) => <option key={file.path} value={file.path}>{file.name}</option>)}</select>}
         {files.length > 0 && <select aria-label="Subtítulos del torrent" value={/^\d+$/.test(selection) ? selection : ''} disabled={unavailable || Boolean(loading)} onChange={(event) => pickTorrentFile(event.target.value)}><option value="">Elegir del torrent…</option>{files.map((file) => <option key={file.id} value={file.id}>{fileName(file.name)}</option>)}</select>}
         <button className="subtitle-open" onClick={() => void findEmbeddedTracks()} disabled={unavailable || probing || Boolean(loading)}>{probing ? <LoaderCircle size={14} className="spin" /> : <Search size={14} />}{probing ? 'Buscando pistas…' : probeError ? 'Reintentar búsqueda' : 'Buscar pistas integradas'}</button>
         {embeddedTracks && embeddedTracks.length > 0 && <select aria-label="Pistas de subtítulos integradas" value={selection.startsWith('embedded:') ? selection.slice(9) : ''} disabled={unavailable || Boolean(loading)} onChange={(event) => pickEmbeddedTrack(event.target.value)}><option value="">Elegir pista integrada…</option>{embeddedTracks.map((track) => <option key={track.id} value={track.id} disabled={!track.supported}>{track.name}{track.language && track.language !== 'und' ? ` · ${track.language}` : ''} · {track.codec}{!track.supported ? ' · no compatible' : ''}</option>)}</select>}

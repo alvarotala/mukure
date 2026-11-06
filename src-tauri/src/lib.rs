@@ -1,5 +1,9 @@
+mod cast_protocol;
+mod casting;
 mod embedded;
 mod media;
+mod online_subtitles;
+mod provider_settings;
 #[cfg(test)]
 mod subtitle_torrent_tests;
 mod subtitles;
@@ -43,6 +47,7 @@ struct EmbeddedRequest {
 }
 
 struct Engine {
+    cast: Arc<casting::CastManager>,
     session: OnceCell<Arc<Session>>,
     media: Arc<MediaServer>,
     active: Mutex<Option<ActiveTorrent>>,
@@ -142,6 +147,7 @@ impl Engine {
             .tempdir_in(root)?;
         let media = MediaServer::start().await?;
         Ok(Arc::new(Self {
+            cast: Arc::new(casting::CastManager::default()),
             session: OnceCell::new(),
             media,
             active: Mutex::new(None),
@@ -251,6 +257,7 @@ impl Engine {
     }
 
     async fn shutdown(&self) {
+        self.cast.stop().await;
         self.media.shutdown().await;
         if let Some(session) = self.session.get() {
             session.stop().await;
@@ -382,6 +389,7 @@ async fn select_file(
     if compatible && e.media.ffmpeg_path().is_none() {
         return Err("FFmpeg no está instalado. Usa el modo directo o instala FFmpeg y vuelve a abrir la app".into());
     }
+    e.cast.stop().await;
     e.media.clear().await;
     if torrent.selected != Some(file_id) {
         torrent.subtitles_cancel.cancel();
@@ -462,6 +470,7 @@ async fn remove_torrent(id: usize, state: State<'_, AppState>) -> Result<(), Str
         .as_ref()
         .filter(|t| t.handle.id() == id)
         .ok_or("La sesión ya no está activa")?;
+    e.cast.stop().await;
     e.media.clear().await;
     torrent.subtitles_cancel.cancel();
     e.session
@@ -494,6 +503,7 @@ async fn open_local_video(
     if e.active.lock().await.is_some() {
         return Err("Detén la sesión torrent antes de abrir un video local".into());
     }
+    e.cast.stop().await;
     let name = path
         .file_name()
         .unwrap_or_default()
@@ -519,6 +529,7 @@ async fn open_local_video(
 #[tauri::command]
 async fn stop_playback(state: State<'_, AppState>) -> Result<(), String> {
     if let Some(e) = state.engine.get() {
+        e.cast.stop().await;
         e.media.clear().await;
     }
     Ok(())
@@ -529,6 +540,102 @@ async fn read_subtitle_file(path: String) -> Result<SubtitleTrack, String> {
     subtitles::read_local(PathBuf::from(path))
         .await
         .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn search_online_subtitles(
+    playback_url: String,
+    provider: String,
+    query: String,
+    language: String,
+    state: State<'_, AppState>,
+) -> Result<online_subtitles::SearchResult, String> {
+    let e = engine(&state).await?;
+    let (_, cancel) = e
+        .media
+        .subtitle_source(&playback_url)
+        .await
+        .map_err(|e| e.to_string())?;
+    let provider_id = provider.clone();
+    let key = if matches!(provider.as_str(), "subdl" | "wyzie") {
+        tauri::async_runtime::spawn_blocking(move || provider_settings::key(&provider_id))
+            .await
+            .map_err(|_| "No se pudo consultar el Llavero")?
+            .map_err(|e| e.to_string())?
+    } else {
+        None
+    };
+    tokio::select! {
+        _ = cancel.cancelled() => Err("El video ya no está activo".into()),
+        result = online_subtitles::search(&provider, &query, &language, key.as_deref()) => result.map_err(|e| format!("{e:#}")),
+    }
+}
+
+#[tauri::command]
+async fn download_online_subtitle(
+    playback_url: String,
+    url: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<SubtitleTrack, String> {
+    let e = engine(&state).await?;
+    let (_, cancel) = e
+        .media
+        .subtitle_source(&playback_url)
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::select! {
+        _ = cancel.cancelled() => Err("El video ya no está activo".into()),
+        result = online_subtitles::download(&url, &name) => result.map_err(|e| format!("{e:#}")),
+    }
+}
+
+#[derive(Serialize)]
+struct LocalSubtitle {
+    name: String,
+    path: String,
+}
+
+#[tauri::command]
+async fn find_local_subtitles(path: String) -> Result<Vec<LocalSubtitle>, String> {
+    let video = PathBuf::from(path);
+    let stem = video
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or("Nombre de video inválido")?
+        .to_lowercase();
+    let parent = video.parent().ok_or("Carpeta de video inválida")?;
+    let mut directory = tokio::fs::read_dir(parent)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut results = Vec::new();
+    while let Some(entry) = directory.next_entry().await.map_err(|e| e.to_string())? {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let candidate = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase();
+        if subtitles::is_subtitle(&name)
+            && (candidate == stem || candidate.starts_with(&format!("{stem}.")))
+            && entry
+                .file_type()
+                .await
+                .map_err(|e| e.to_string())?
+                .is_file()
+        {
+            results.push(LocalSubtitle {
+                name,
+                path: path.to_string_lossy().into_owned(),
+            });
+        }
+        if results.len() == 100 {
+            break;
+        }
+    }
+    results.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(results)
 }
 
 #[tauri::command]
@@ -637,9 +744,70 @@ async fn stop_embedded_subtitle(
     Ok(())
 }
 
+#[tauri::command]
+async fn discover_cast_devices(
+    state: State<'_, AppState>,
+) -> Result<Vec<casting::CastDevice>, String> {
+    engine(&state)
+        .await?
+        .cast
+        .discover()
+        .await
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn get_cast_status(state: State<'_, AppState>) -> Result<casting::CastStatus, String> {
+    Ok(engine(&state).await?.cast.status().await)
+}
+#[tauri::command]
+async fn start_cast(
+    playback_url: String,
+    device_id: Option<String>,
+    address: Option<String>,
+    title: String,
+    position: f64,
+    convert: bool,
+    subtitle: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<casting::CastStatus, String> {
+    let e = engine(&state).await?;
+    e.cast
+        .start(
+            e.media.clone(),
+            playback_url,
+            device_id,
+            address,
+            title,
+            position,
+            convert,
+            subtitle,
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn cast_action(
+    action: String,
+    value: Option<f64>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    engine(&state)
+        .await?
+        .cast
+        .action(action, value)
+        .await
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn stop_cast(state: State<'_, AppState>) -> Result<(), String> {
+    engine(&state).await?.cast.stop().await;
+    Ok(())
+}
+
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             app.manage(AppState {
                 cache_root: app.path().app_cache_dir()?.join("sessions"),
@@ -649,6 +817,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_app_info,
+            discover_cast_devices,
+            get_cast_status,
+            start_cast,
+            cast_action,
+            stop_cast,
             add_magnet,
             add_torrent_file,
             select_file,
@@ -657,6 +830,13 @@ pub fn run() {
             open_local_video,
             stop_playback,
             read_subtitle_file,
+            find_local_subtitles,
+            search_online_subtitles,
+            download_online_subtitle,
+            provider_settings::get_subtitle_providers,
+            provider_settings::connect_subtitle_provider,
+            provider_settings::disconnect_subtitle_provider,
+            provider_settings::open_subtitle_provider_page,
             read_torrent_subtitle,
             get_embedded_subtitles,
             start_embedded_subtitle,

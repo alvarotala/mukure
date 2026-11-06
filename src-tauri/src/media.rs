@@ -260,6 +260,14 @@ async fn direct(
     let Some(entry) = get_entry(&state, &token, &id).await else {
         return empty_response(StatusCode::NOT_FOUND);
     };
+    direct_entry(entry, method, headers).await
+}
+
+async fn direct_entry(
+    entry: Arc<MediaEntry>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response<Body> {
     let opened = tokio::select! {
         _ = entry.cancel.cancelled() => return empty_response(StatusCode::GONE),
         value = open_source(&entry.source) => value,
@@ -714,6 +722,124 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn cast_endpoint_ranges_acl_subtitles_and_revocation() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("video.mp4");
+        tokio::fs::write(&file, b"0123456789").await.unwrap();
+        let server = MediaServer::start().await.unwrap();
+        let playback = server
+            .register(MediaSource::Local(file), "video/mp4".into(), false)
+            .await
+            .unwrap();
+        let subtitle = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHola\n".to_owned();
+        let cast = server
+            .cast_stream(
+                &playback,
+                std::net::Ipv4Addr::LOCALHOST,
+                std::net::Ipv4Addr::LOCALHOST,
+                false,
+                Some(subtitle.clone()),
+            )
+            .await
+            .unwrap();
+        let response = request(&cast.url, "GET", "Range: bytes=2-5\r\n").await;
+        let (headers, body) = split_response(&response);
+        assert!(headers.starts_with("HTTP/1.1 206"));
+        assert!(headers.contains("access-control-allow-origin: *"));
+        assert_eq!(body, b"2345");
+        let response = request(cast.subtitle_url.as_deref().unwrap(), "GET", "").await;
+        assert_eq!(split_response(&response).1, subtitle.as_bytes());
+        let url = reqwest::Url::parse(&cast.url).unwrap();
+        let bad_token = format!(
+            "http://{}:{}/wrong/video",
+            url.host_str().unwrap(),
+            url.port().unwrap()
+        );
+        assert!(split_response(&request(&bad_token, "GET", "").await)
+            .0
+            .starts_with("HTTP/1.1 404"));
+        let denied = server
+            .cast_stream(
+                &playback,
+                std::net::Ipv4Addr::LOCALHOST,
+                std::net::Ipv4Addr::new(192, 168, 1, 5),
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(split_response(&request(&denied.url, "GET", "").await)
+            .0
+            .starts_with("HTTP/1.1 404"));
+        server.clear().await;
+        assert!(cast.cancel.is_cancelled());
+        assert!(denied.cancel.is_cancelled());
+        assert!(!hls_filename("../video.mp4"));
+        assert!(!hls_filename("seg../secret.ts"));
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cast_conversion_serves_real_hls_and_cleans_up() {
+        let Some(ffmpeg) = find_ffmpeg().await else {
+            return;
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("cast.mkv");
+        let generated = Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x90:rate=12",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+            ])
+            .arg(&file)
+            .status()
+            .await
+            .unwrap();
+        assert!(generated.success());
+        let server = MediaServer::start().await.unwrap();
+        let playback = server
+            .register(MediaSource::Local(file), "video/x-matroska".into(), false)
+            .await
+            .unwrap();
+        let cast = server
+            .cast_stream(
+                &playback,
+                std::net::Ipv4Addr::LOCALHOST,
+                std::net::Ipv4Addr::LOCALHOST,
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        let response = request(&cast.url, "GET", "").await;
+        let (headers, body) = split_response(&response);
+        assert!(headers.starts_with("HTTP/1.1 200"));
+        let playlist = std::str::from_utf8(body).unwrap();
+        assert!(playlist.starts_with("#EXTM3U"));
+        let segment = playlist.lines().find(|line| line.ends_with(".ts")).unwrap();
+        let segment_url = cast.url.replace("index.m3u8", segment);
+        let segment_response = request(&segment_url, "GET", "").await;
+        let (_, content) = split_response(&segment_response);
+        assert!(!content.is_empty());
+        assert_eq!(content[0], 0x47); // MPEG-TS packet synchronization byte
+        let cancel = cast.cancel.clone();
+        drop(cast);
+        assert!(cancel.is_cancelled());
+        server.shutdown().await;
+    }
+
     async fn request(url: &str, method: &str, extra_headers: &str) -> Vec<u8> {
         let address_path = url.strip_prefix("http://").unwrap();
         let (address, path) = address_path.split_once('/').unwrap();
@@ -935,4 +1061,258 @@ mod tests {
         .await
         .expect("FFmpeg integration test exceeded 20 seconds");
     }
+}
+
+/// A receiver-scoped, temporary LAN endpoint. Dropping it revokes the URL and
+/// terminates conversion; ordinary desktop playback remains loopback-only.
+pub struct CastStream {
+    pub url: String,
+    pub content_type: String,
+    pub subtitle_url: Option<String>,
+    pub cancel: CancellationToken,
+}
+impl Drop for CastStream {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+struct CastHttpState {
+    entry: Arc<MediaEntry>,
+    token: String,
+    receiver: std::net::IpAddr,
+    cancel: CancellationToken,
+    hls: Option<PathBuf>,
+    subtitle: Option<String>,
+}
+
+impl MediaServer {
+    pub async fn cast_stream(
+        &self,
+        playback_url: &str,
+        local_ip: std::net::Ipv4Addr,
+        receiver: std::net::Ipv4Addr,
+        convert: bool,
+        subtitle: Option<String>,
+    ) -> Result<CastStream> {
+        if let Some(text) = &subtitle {
+            // Bound and validate data from the WebView before exposing a track.
+            subtitles_for_cast(text)?;
+        }
+        let entry = self
+            .shared
+            .active
+            .read()
+            .await
+            .as_ref()
+            .filter(|entry| entry.playback_url == playback_url && !entry.cancel.is_cancelled())
+            .cloned()
+            .context("El video ya no está activo")?;
+        let cancel = entry.cancel.child_token();
+        let listener = TcpListener::bind((local_ip, 0))
+            .await
+            .context("No se pudo abrir el video en la red local")?;
+        let token = Uuid::new_v4().simple().to_string();
+        let base = format!(
+            "http://{}:{}/{}",
+            local_ip,
+            listener.local_addr()?.port(),
+            token
+        );
+        let subtitle_url = subtitle.as_ref().map(|_| format!("{base}/subtitles.vtt"));
+        let hls_dir = if convert {
+            Some(tempfile::Builder::new().prefix("mukure-cast-").tempdir()?)
+        } else {
+            None
+        };
+        let content_type = if convert {
+            "application/x-mpegURL".to_owned()
+        } else {
+            entry.mime.to_str()?.to_owned()
+        };
+        let state = Arc::new(CastHttpState {
+            entry: entry.clone(),
+            token,
+            receiver: receiver.into(),
+            cancel: cancel.clone(),
+            hls: hls_dir.as_ref().map(|d| d.path().to_owned()),
+            subtitle,
+        });
+        let router = Router::new()
+            .route("/{token}/{file}", axum::routing::any(cast_http))
+            .with_state(state);
+        let server_cancel = cancel.clone();
+        tokio::spawn(async move {
+            let serve = axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(server_cancel.clone().cancelled_owned());
+            let _ = serve.await;
+        });
+        let stream = CastStream {
+            url: format!("{base}/{}", if convert { "index.m3u8" } else { "video" }),
+            content_type,
+            subtitle_url,
+            cancel: cancel.clone(),
+        };
+        if let Some(directory) = hls_dir {
+            let ffmpeg = self
+                .ffmpeg_path()
+                .context("FFmpeg no está disponible para convertir el video")?;
+            let input = format!(
+                "{}/{}/stream/{}",
+                self.shared.origin, self.shared.token, entry.id
+            );
+            let mut child = Command::new(ffmpeg).args([
+                "-hide_banner", "-loglevel", "error", "-nostdin", "-rw_timeout", "45000000",
+                "-re", "-i", &input, "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+                "-vf", "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                "-r", "30", "-profile:v", "high", "-level:v", "4.1", "-maxrate", "5M", "-bufsize", "10M",
+                "-g", "120", "-keyint_min", "120", "-sc_threshold", "0",
+                "-c:a", "aac", "-b:a", "160k", "-ac", "2",
+                "-f", "hls", "-hls_time", "4", "-hls_list_size", "12", "-hls_delete_threshold", "2",
+                "-hls_flags", "delete_segments+independent_segments+temp_file", "-hls_segment_filename", "seg%06d.ts", "index.m3u8",
+            ]).current_dir(directory.path()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+                .kill_on_drop(true).spawn().context("No se pudo convertir el video para Chromecast")?;
+            let playlist = directory.path().join("index.m3u8");
+            let process_cancel = cancel.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = process_cancel.cancelled() => { let _ = child.kill().await; let _ = child.wait().await; },
+                    result = child.wait() => {
+                        if !result.is_ok_and(|status| status.success()) { process_cancel.cancel(); }
+                        // Keep a completed short video's final segments until Cast disconnects.
+                        process_cancel.cancelled().await;
+                    }
+                }
+                drop(directory);
+            });
+            let ready = async {
+                loop {
+                    if tokio::fs::metadata(&playlist).await.is_ok() {
+                        return Ok(());
+                    }
+                    tokio::select! {
+                        _ = cancel.cancelled() => bail!("Se interrumpió la conversión para Chromecast"),
+                        _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                    }
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(60), ready).await
+                .context("No llegó video para convertir en 60 segundos. Revisá los peers o probá Directo")??;
+        }
+        Ok(stream)
+    }
+}
+
+fn subtitles_for_cast(text: &str) -> Result<()> {
+    crate::subtitles::parse("Chromecast.vtt".into(), text.as_bytes()).map(|_| ())
+}
+
+fn hls_filename(name: &str) -> bool {
+    name == "index.m3u8"
+        || name
+            .strip_prefix("seg")
+            .and_then(|s| s.strip_suffix(".ts"))
+            .is_some_and(|digits| {
+                !digits.is_empty()
+                    && digits.len() <= 10
+                    && digits.bytes().all(|b| b.is_ascii_digit())
+            })
+}
+
+async fn cast_http(
+    State(state): State<Arc<CastHttpState>>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    RoutePath((token, file)): RoutePath<(String, String)>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response<Body> {
+    if peer.ip() != state.receiver || token != state.token {
+        return empty_response(StatusCode::NOT_FOUND);
+    }
+    if state.cancel.is_cancelled() {
+        return empty_response(StatusCode::GONE);
+    }
+    let mut response = if method == Method::OPTIONS {
+        empty_response(StatusCode::NO_CONTENT)
+    } else if method != Method::GET && method != Method::HEAD {
+        empty_response(StatusCode::METHOD_NOT_ALLOWED)
+    } else if file == "video" && state.hls.is_none() {
+        direct_entry(state.entry.clone(), method.clone(), headers).await
+    } else if file == "subtitles.vtt" {
+        match &state.subtitle {
+            Some(text) => cast_bytes(
+                text.as_bytes().to_vec(),
+                "text/vtt; charset=utf-8",
+                method == Method::HEAD,
+            ),
+            None => empty_response(StatusCode::NOT_FOUND),
+        }
+    } else if let Some(directory) = &state.hls {
+        if !hls_filename(&file) {
+            return empty_response(StatusCode::NOT_FOUND);
+        }
+        match tokio::fs::read(directory.join(&file)).await {
+            Ok(bytes) => cast_bytes(
+                bytes,
+                if file.ends_with(".m3u8") {
+                    "application/x-mpegURL"
+                } else {
+                    "video/mp2t"
+                },
+                method == Method::HEAD,
+            ),
+            Err(_) => empty_response(StatusCode::NOT_FOUND),
+        }
+    } else {
+        empty_response(StatusCode::NOT_FOUND)
+    };
+    // The Cast receiver runs from Google's origin; this port serves only the
+    // selected receiver and unguessable session URLs, with no control routes.
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, HEAD, OPTIONS"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("Range, Content-Type"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("Content-Length, Content-Range, Accept-Ranges"),
+    );
+    let (parts, body) = response.into_parts();
+    let mut data = body.into_data_stream();
+    let cancel = state.cancel.clone();
+    let stream = async_stream::stream! {
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                chunk = data.next() => match chunk { Some(value) => yield value, None => break }
+            }
+        }
+    };
+    Response::from_parts(parts, Body::from_stream(stream))
+}
+
+fn cast_bytes(bytes: Vec<u8>, mime: &'static str, head: bool) -> Response<Body> {
+    let mut response = empty_response(StatusCode::OK);
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&bytes.len().to_string()).unwrap(),
+    );
+    if !head {
+        *response.body_mut() = Body::from(bytes);
+    }
+    response
 }

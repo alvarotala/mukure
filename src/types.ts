@@ -58,7 +58,41 @@ export interface EmbeddedSubtitleTrack {
   supported: boolean;
 }
 
+export interface OnlineSubtitle {
+  id: string;
+  provider: string;
+  name: string;
+  language: string;
+  url: string;
+  format: string;
+}
+
+export interface SubtitleSearchResult {
+  title: string;
+  subtitles: OnlineSubtitle[];
+}
+
 export type SubtitleEvent =
   | { type: 'cues'; cues: SubtitleCue[] }
   | { type: 'done' }
   | { type: 'error'; message: string };
+
+export interface CastDevice {
+  id: string;
+  name: string;
+  model: string;
+  address: string;
+  port: number;
+}
+export interface CastStatus {
+  active: boolean;
+  deviceName: string;
+  playerState: string;
+  currentTime: number;
+  duration: number | null;
+  volume: number | null;
+  muted: boolean;
+  canSeek: boolean;
+  error: string | null;
+}
+export type CastAction = 'play' | 'pause' | 'seek' | 'volume' | 'mute';
