@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1 — 2026-11-05
+
+- Cabecera simplificada: se eliminan los textos de bienvenida cuando no hay un video abierto.
+- Se retira el selector de tamaño de la cabecera; la ventana se redimensiona desde sus bordes.
+- El modo FFmpeg libera datos reproducidos y reintenta los fragmentos cuando se alcanza el límite de memoria del buffer.
+
 ## 0.1.0 — 2026-11-05
 
 Primera versión de Mukure para macOS Apple Silicon.

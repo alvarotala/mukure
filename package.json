@@ -1,6 +1,6 @@
 {
   "name": "mukure",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.21.0",
@@ -11,7 +11,7 @@
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "node --experimental-strip-types --test src/subtitles.test.ts",
+    "test": "node --experimental-strip-types --test src/*.test.ts",
     "tauri": "sh scripts/with-rust.sh tauri",
     "check:rust": "sh scripts/with-rust.sh cargo check --locked --manifest-path src-tauri/Cargo.toml",
     "test:rust": "sh scripts/with-rust.sh cargo test --locked --manifest-path src-tauri/Cargo.toml --lib",

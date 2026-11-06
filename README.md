@@ -2,7 +2,7 @@
   <img src="src-tauri/app-icon.svg" width="88" alt="Mukure" />
   <h1>Mukure</h1>
   <p>Tu video, tus subtítulos, tu pantalla.</p>
-  <p><strong>v0.1.0 · macOS Apple Silicon · MIT</strong></p>
+  <p><strong>v0.1.1 · macOS Apple Silicon · MIT</strong></p>
 </div>
 
 Mukure es un reproductor de escritorio para videos locales, archivos `.torrent` y enlaces magnet. Reproduce mientras descarga, busca subtítulos automáticamente y permite enviar el video a un Chromecast. Su nombre viene de la zarigüeya paraguaya en guaraní.
@@ -17,7 +17,7 @@ Mukure es un reproductor de escritorio para videos locales, archivos `.torrent` 
 
 ## Instalación
 
-El paquete `Mukure-0.1.0-macos-arm64.zip` contiene `Mukure.app`. Descomprímelo y mueve la aplicación a **Aplicaciones**. FFmpeg y FFprobe vienen incluidos. Para crear el paquete desde el código fuente, sigue los pasos de desarrollo de abajo.
+El paquete `Mukure-0.1.1-macos-arm64.zip` contiene `Mukure.app`. Descomprímelo y mueve la aplicación a **Aplicaciones**. FFmpeg y FFprobe vienen incluidos. Para crear el paquete desde el código fuente, sigue los pasos de desarrollo de abajo.
 
 ## Uso
 

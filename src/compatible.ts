@@ -3,8 +3,20 @@ const CODECS = [
   'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',
   'video/mp4; codecs="avc1.42C01F, mp4a.40.2"',
 ];
-const BUFFER_AHEAD = 30;
-const KEEP_BEHIND = 30;
+const BUFFER_AHEAD = 20;
+const KEEP_BEHIND = 10;
+const MIN_KEEP_BEHIND = 3;
+const MAX_APPEND_BYTES = 256 * 1024;
+const MIN_APPEND_BYTES = 16 * 1024;
+const QUOTA_STALL_TIMEOUT = 15000;
+
+function quotaExceeded(reason: unknown): boolean {
+  return typeof reason === 'object' && reason !== null && 'name' in reason && reason.name === 'QuotaExceededError';
+}
+
+function bufferFull(): Error {
+  return new Error('El buffer de video del reproductor está lleno y no se pudo liberar espacio. Probá el modo Directo o volvé a abrir el video.');
+}
 
 function aborted(): DOMException {
   return new DOMException('Reproducción cancelada', 'AbortError');
@@ -139,17 +151,82 @@ export function attachCompatibleVideo(video: HTMLVideoElement, url: string, onEr
     if (!response.body) throw new Error('El WebView no permite leer la salida de FFmpeg como un stream.');
     reader = response.body.getReader();
     let receivedBytes = 0;
+    let aheadLimit = BUFFER_AHEAD;
+    let keepBehind = KEEP_BEHIND;
+    let appendSize = MAX_APPEND_BYTES;
+    let recoveringQuota = false;
+    let stalledFor = 0;
+
+    const bufferedAhead = () => {
+      const ranges = buffer!.buffered;
+      // Only playable data around the current position can unblock an append.
+      for (let i = 0; i < ranges.length; i++) {
+        if (ranges.start(i) <= video.currentTime + 0.1 && ranges.end(i) > video.currentTime) {
+          return ranges.end(i) - video.currentTime;
+        }
+      }
+      return 0;
+    };
+    const trimPlayed = async () => {
+      const ranges = buffer!.buffered;
+      const removeTo = video.currentTime - keepBehind;
+      if (!ranges.length || removeTo <= ranges.start(0) + 0.5) return false;
+      const previousStart = ranges.start(0);
+      await updateBuffer(buffer!, source, signal, () => buffer!.remove(0, removeTo));
+      return !buffer!.buffered.length || buffer!.buffered.start(0) > previousStart;
+    };
+    const waitForSpace = async () => {
+      const position = video.currentTime;
+      const paused = video.paused;
+      const started = performance.now();
+      await waitForPlayback(video, signal);
+      if (!recoveringQuota || paused || video.paused || video.currentTime > position + 0.01) stalledFor = 0;
+      else stalledFor += performance.now() - started;
+      if (stalledFor >= QUOTA_STALL_TIMEOUT) throw bufferFull();
+    };
+    const makeRoom = async () => {
+      // Trim even while the read-ahead limit is reached or playback is paused.
+      await trimPlayed();
+      while (bufferedAhead() > aheadLimit) {
+        await waitForSpace();
+        await trimPlayed();
+      }
+    };
+    const appendChunk = async (value: Uint8Array) => {
+      let offset = 0;
+      while (offset < value.byteLength) {
+        if (signal.aborted) throw aborted();
+        await makeRoom();
+        const length = Math.min(appendSize, value.byteLength - offset);
+        const chunk = new Uint8Array(length);
+        chunk.set(value.subarray(offset, offset + length));
+        try {
+          await updateBuffer(buffer!, source, signal, () => buffer!.appendBuffer(chunk));
+          // A synchronous quota exception accepts none of the bytes. Advance
+          // only after updateend, so retries neither drop nor duplicate data.
+          offset += length;
+          recoveringQuota = false;
+          stalledFor = 0;
+        } catch (reason) {
+          if (!quotaExceeded(reason)) throw reason;
+          recoveringQuota = true;
+          aheadLimit = Math.max(2, aheadLimit / 2);
+          keepBehind = MIN_KEEP_BEHIND;
+          if (await trimPlayed()) continue;
+          if (length > MIN_APPEND_BYTES) {
+            appendSize = Math.max(MIN_APPEND_BYTES, Math.floor(length / 2));
+            continue;
+          }
+          if (bufferedAhead() <= 0.25) throw bufferFull();
+          // Keep the pending bytes and stop reading the response until playback
+          // frees memory. Pausing is allowed; detaching cancels this wait.
+          await waitForSpace();
+        }
+      }
+    };
     try {
       while (!signal.aborted) {
-        const ranges = buffer.buffered;
-        if (ranges.length && ranges.end(ranges.length - 1) - video.currentTime > BUFFER_AHEAD) {
-          await waitForPlayback(video, signal);
-          continue;
-        }
-        const removeTo = video.currentTime - KEEP_BEHIND;
-        if (ranges.length && removeTo > 0 && removeTo - ranges.start(0) > 5) {
-          await updateBuffer(buffer, source, signal, () => buffer!.remove(0, removeTo));
-        }
+        await makeRoom();
         const { done, value } = await reader.read();
         if (done) {
           if (!receivedBytes) throw new Error('FFmpeg cerró la conversión sin generar video.');
@@ -158,10 +235,7 @@ export function attachCompatibleVideo(video: HTMLVideoElement, url: string, onEr
         }
         if (!value.byteLength) continue;
         receivedBytes += value.byteLength;
-        // Copy to an ArrayBuffer backed view, including on engines with shared-buffer typings.
-        const chunk = new Uint8Array(value.byteLength);
-        chunk.set(value);
-        await updateBuffer(buffer, source, signal, () => buffer!.appendBuffer(chunk));
+        await appendChunk(value);
       }
     } finally {
       reader.releaseLock();

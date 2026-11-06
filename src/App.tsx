@@ -3,10 +3,9 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import {
   ArrowDown, ArrowUp, Captions, Cast, Check, CircleHelp, FileVideo2, FolderOpen,
-  KeyRound, Link2, ListVideo, LoaderCircle, Maximize2, MonitorPlay, Play,
+  KeyRound, Link2, ListVideo, LoaderCircle, MonitorPlay, Play,
   Radio, Settings2, Square, Users, X,
 } from 'lucide-react';
-import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import PlayerControls from './PlayerControls';
 import CastPanel from './CastPanel';
 import { useCasting } from './useCasting';
@@ -194,24 +193,14 @@ function App() {
       : 'No se pudo reproducir la salida de FFmpeg. Revisá que el archivo tenga video y que el torrent tenga peers disponibles.');
   }
 
-  async function resizeWindow(value: string) {
-    if (!desktop || !value) return;
-    const [width, height] = value.split('x').map(Number);
-    try {
-      const window = getCurrentWindow();
-      if (await window.isFullscreen()) await window.setFullscreen(false);
-      await window.setSize(new LogicalSize(width, height));
-    } catch (reason) { setError(errorMessage(reason)); }
-  }
   const togglePanel = (next: typeof panel) => setPanel((current) => current === next ? null : next);
 
   return (
     <div className={`app-shell${fullscreen ? ' is-fullscreen' : ''}${chromeHidden ? ' chrome-hidden' : ''}`}>
       <header className="app-header" inert={chromeHidden}>
         <div className="brand"><span className="brand-mark"><Play size={17} fill="currentColor" /></span><strong>mukure<span>.</span></strong></div>
-        <div className="now-playing"><span>{hasSource ? 'AHORA REPRODUCIENDO' : 'REPRODUCTOR DE VIDEO'}</span><strong title={sourceTitle || ''}>{sourceTitle ? fileName(sourceTitle) : 'Tu próxima historia empieza acá'}</strong></div>
+        {sourceTitle && <div className="now-playing"><span>AHORA REPRODUCIENDO</span><strong title={sourceTitle}>{fileName(sourceTitle)}</strong></div>}
         <div className="header-actions">
-          <label className="window-size" title="Cambiar tamaño de la ventana"><Maximize2 size={16} /><select aria-label="Tamaño de ventana" value="" disabled={!desktop} onChange={(event) => void resizeWindow(event.target.value)}><option value="" disabled>Tamaño</option><option value="640x420">Compacta · 640 × 420</option><option value="960x640">Mediana · 960 × 640</option><option value="1280x800">Grande · 1280 × 800</option></select></label>
           <button className={`header-button ${panel === 'open' ? 'active' : ''}`} onClick={() => togglePanel('open')} aria-label="Abrir video o torrent"><FolderOpen size={17} /><span>Abrir</span></button>
           <button className={`icon-button ${panel === 'cast' || casting.status?.active ? 'active' : ''}`} title="Enviar a Chromecast" aria-label="Enviar a Chromecast" onClick={() => togglePanel('cast')}><Cast size={19} /></button>
           <button className={`icon-button ${panel === 'providers' ? 'active' : ''}`} title="Fuentes de subtítulos" aria-label="Fuentes de subtítulos" onClick={() => togglePanel('providers')}><Settings2 size={18} /></button>
@@ -236,7 +225,7 @@ function App() {
             <div hidden={panel !== 'subtitles'}><SubtitleControls key={localPath ? `local:${localPath}` : torrent ? `torrent:${torrent.id}:${torrent.selectedFile}` : 'empty'} videoRef={videoRef} playback={playback} torrentId={torrent?.id} files={torrent?.subtitles || []} localPath={localPath} providers={providers.filter((p) => p.connected).map((p) => p.id)} onProviders={() => setPanel('providers')} onCastSubtitle={setCastSubtitle} disabled={disabled} /></div>
             <div hidden={panel !== 'providers'}><ProviderSettings statuses={providers} disabled={!desktop} onChange={refreshProviders} /></div>
             <section hidden={panel !== 'files'}><div className="panel-heading"><ListVideo size={20} /><div><h2>Sesión actual</h2><p>{hasSource ? torrent ? 'Elegí el video que querés reproducir.' : 'Video abierto desde tu equipo.' : 'Todavía no hay un video abierto.'}</p></div></div>{localPath && <div className="session-card"><FileVideo2 size={20} /><span>{fileName(localPath)}</span></div>}{torrent?.files.map((file) => <button className={`file-button ${torrent.selectedFile === file.id ? 'selected' : ''}`} key={file.id} disabled={disabled} onClick={() => void run('Cargando video…', (ticket) => playTorrentFile(torrent, file, mode, ticket))}><FileVideo2 size={18} /><span><strong>{fileName(file.name)}</strong><small>{formatBytes(file.length)}</small></span>{torrent.selectedFile === file.id && <Check size={15} />}</button>)}{torrent && <div className="transfer-panel"><div className="transfer-top"><span>{stats?.finished ? 'Descarga completa' : 'Descargando'}</span><strong>{progress.toFixed(1)}%</strong></div><div className="progress-track"><div style={{ width: `${progress}%` }} /></div><div className="transfer-details"><span><ArrowDown size={13} />{formatBytes(stats?.downloadSpeed || 0)}/s</span><span><ArrowUp size={13} />{formatBytes(stats?.uploadSpeed || 0)}/s</span><span><Users size={13} />{stats?.peers || 0} peers</span><span>{formatBytes(stats?.progressBytes || 0)} / {formatBytes(stats?.totalBytes || 0)}</span></div>{statsError && <p className="inline-error">{statsError}</p>}</div>}{hasSource && <button className="secondary-button close-session" disabled={disabled} onClick={() => void run('Cerrando sesión…', async () => clearSource())}><Square size={14} />Cerrar video y detener sesión</button>}</section>
-            <section hidden={panel !== 'help'} className="help-panel"><div className="panel-heading"><CircleHelp size={20} /><div><h2>Acomodá tu reproductor</h2><p>El video ocupa el espacio disponible.</p></div></div><p>En pantalla completa, las barras y el cursor se ocultan tras 3 segundos de inactividad. Mové el mouse o usá el teclado para mostrarlos.</p><p>Arrastrá cualquier borde de la ventana para cambiar su tamaño, o elegí un tamaño desde la barra superior.</p><dl className="shortcuts"><div><dt>Reproducir / pausar</dt><dd>Espacio</dd></div><div><dt>Saltar 10 segundos</dt><dd>← / →</dd></div><div><dt>Silenciar</dt><dd>M</dd></div><div><dt>Pantalla completa</dt><dd>F</dd></div></dl><p>Los subtítulos se buscan automáticamente al abrir un video. En el botón CC podés elegir una pista, cambiar el idioma y ajustar la sincronización.</p><p>Directo usa los formatos que admite tu equipo. FFmpeg convierte formatos adicionales; todavía no permite saltos y puede consumir más CPU.</p><p>Los torrents necesitan peers disponibles y también comparten piezas. Al cerrar la sesión se borran sus datos descargados.</p><p className="cache-info">Carpeta de datos:<br /><code>{info?.cacheDir || 'Disponible en la app de escritorio'}</code></p></section>
+            <section hidden={panel !== 'help'} className="help-panel"><div className="panel-heading"><CircleHelp size={20} /><div><h2>Acomodá tu reproductor</h2><p>El video ocupa el espacio disponible.</p></div></div><p>En pantalla completa, las barras y el cursor se ocultan tras 3 segundos de inactividad. Mové el mouse o usá el teclado para mostrarlos.</p><p>Arrastrá cualquier borde de la ventana para cambiar su tamaño.</p><dl className="shortcuts"><div><dt>Reproducir / pausar</dt><dd>Espacio</dd></div><div><dt>Saltar 10 segundos</dt><dd>← / →</dd></div><div><dt>Silenciar</dt><dd>M</dd></div><div><dt>Pantalla completa</dt><dd>F</dd></div></dl><p>Los subtítulos se buscan automáticamente al abrir un video. En el botón CC podés elegir una pista, cambiar el idioma y ajustar la sincronización.</p><p>Directo usa los formatos que admite tu equipo. FFmpeg convierte formatos adicionales; todavía no permite saltos y puede consumir más CPU.</p><p>Los torrents necesitan peers disponibles y también comparten piezas. Al cerrar la sesión se borran sus datos descargados.</p><p className="cache-info">Carpeta de datos:<br /><code>{info?.cacheDir || 'Disponible en la app de escritorio'}</code></p></section>
           </div>
         </aside>
       </main>
