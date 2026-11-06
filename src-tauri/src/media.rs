@@ -520,6 +520,18 @@ async fn find_media_tool(tool: &str, variable: &str) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(variable) {
         candidates.push(PathBuf::from(path));
     }
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            // Tauri macOS bundles place executables in Contents/MacOS and
+            // bundled resources in Contents/Resources. This works from Finder,
+            // where Homebrew and developer-tool paths may be absent from PATH.
+            if let Some(contents) = directory.parent() {
+                candidates.push(contents.join(format!("Resources/bin/{tool}")));
+            }
+            candidates.push(directory.join(format!("bin/{tool}")));
+            candidates.push(directory.join(format!("resources/bin/{tool}")));
+        }
+    }
     if let Some(paths) = std::env::var_os("PATH") {
         candidates.extend(std::env::split_paths(&paths).map(|path| {
             path.join(if cfg!(windows) {
@@ -533,18 +545,6 @@ async fn find_media_tool(tool: &str, variable: &str) -> Option<PathBuf> {
         PathBuf::from(format!("/opt/homebrew/bin/{tool}")),
         PathBuf::from(format!("/usr/local/bin/{tool}")),
     ]);
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(directory) = executable.parent() {
-            // Tauri macOS bundles place executables in Contents/MacOS and
-            // bundled resources in Contents/Resources. This works from Finder,
-            // where Homebrew and developer-tool paths may be absent from PATH.
-            if let Some(contents) = directory.parent() {
-                candidates.push(contents.join(format!("Resources/bin/{tool}")));
-            }
-            candidates.push(directory.join(format!("bin/{tool}")));
-            candidates.push(directory.join(format!("resources/bin/{tool}")));
-        }
-    }
     if let Ok(directory) = std::env::current_dir() {
         for root in [Some(directory.as_path()), directory.parent()]
             .into_iter()

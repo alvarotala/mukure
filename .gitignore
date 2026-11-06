@@ -8,3 +8,11 @@ src-tauri/gen/
 .DS_Store
 .local-test/
 *.tsbuildinfo
+src-tauri/resources/media/
+src-tauri/resources/notices/
+release/
+.env
+.env.*
+!.env.example
+*.p12
+*.p8

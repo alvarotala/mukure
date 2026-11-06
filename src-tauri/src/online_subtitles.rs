@@ -108,7 +108,7 @@ fn allowed_url(url: &Url) -> bool {
 
 fn client() -> Result<Client> {
     Ok(Client::builder()
-        .user_agent("Mukure/0.1.0")
+        .user_agent(concat!("Mukure/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(20))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {

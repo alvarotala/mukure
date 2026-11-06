@@ -24,12 +24,6 @@ importers:
         specifier: ^19.3.1
         version: 19.3.1(react@19.3.1)
     devDependencies:
-      '@ffmpeg-installer/darwin-arm64':
-        specifier: ^4.1.5
-        version: 4.1.5
-      '@ffprobe-installer/darwin-arm64':
-        specifier: ^5.0.1
-        version: 5.0.1
       '@tauri-apps/cli':
         specifier: ^2.12.4
         version: 2.12.4
@@ -53,16 +47,6 @@ importers:
         version: 8.3.5(@types/node@26.6.6)
 
 packages:
-
-  '@ffmpeg-installer/darwin-arm64@4.1.5':
-    resolution: {integrity: sha512-hYqTiP63mXz7wSQfuqfFwfLOfwwFChUedeCVKkBtl/cliaTM7/ePI9bVzfZ2c+dWu3TqCwLDRWNSJ5pqZl8otA==}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@ffprobe-installer/darwin-arm64@5.0.1':
-    resolution: {integrity: sha512-vwNCNjokH8hfkbl6m95zICHwkSzhEvDC3GVBcUp5HX8+4wsX10SP3B+bGur7XUzTIZ4cQpgJmEIAx6TUwRepMg==}
-    cpu: [arm64]
-    os: [darwin]
 
   '@oxc-project/types@0.155.0':
     resolution: {integrity: sha512-SeE8JPwW1xs1tHeNycjUtUBdhorRa8o4jlvjwk49R7/Z291i+4DQa7JJIgOm/TaYQZx+QrPQbVJ/9c8dMIZN8Q==}
@@ -592,10 +576,6 @@ packages:
         optional: true
 
 snapshots:
-
-  '@ffmpeg-installer/darwin-arm64@4.1.5': {}
-
-  '@ffprobe-installer/darwin-arm64@5.0.1': {}
 
   '@oxc-project/types@0.155.0': {}
 

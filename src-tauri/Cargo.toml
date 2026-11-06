@@ -1,7 +1,10 @@
 [package]
 name = "mukure"
 version = "0.1.0"
-description = "Local-first torrent video player"
+description = "Desktop video player with torrents, subtitles and Chromecast"
+license = "MIT"
+repository = "https://github.com/alvarotala/mukure"
+publish = false
 edition = "2021"
 rust-version = "1.88"
 

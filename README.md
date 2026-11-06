@@ -1,27 +1,82 @@
-# Mukure
+<div align="center">
+  <img src="src-tauri/app-icon.svg" width="88" alt="Mukure" />
+  <h1>Mukure</h1>
+  <p>Tu video, tus subtítulos, tu pantalla.</p>
+  <p><strong>v0.1.0 · macOS Apple Silicon · MIT</strong></p>
+</div>
 
-Prototipo de reproductor de escritorio con **Tauri 2, React y Rust**. Abre magnet links, archivos `.torrent` y videos locales; permite elegir un video del torrent y reproducirlo mientras se descarga. El objetivo inicial es **macOS con Apple Silicon**.
+Mukure es un reproductor de escritorio para videos locales, archivos `.torrent` y enlaces magnet. Reproduce mientras descarga, busca subtítulos automáticamente y permite enviar el video a un Chromecast. Su nombre viene de la zarigüeya paraguaya en guaraní.
 
-## Probar en desarrollo
+## Funciones
 
-Requisitos: Node.js compatible con Vite 8, pnpm, Rust estable y Xcode Command Line Tools. Consulta los [requisitos oficiales de Tauri](https://v2.tauri.app/start/prerequisites/#macos). La primera compilación descarga dependencias y puede tardar varios minutos.
+- Videos locales y streaming BitTorrent, con selección de archivos dentro del torrent.
+- Reproducción directa o conversión con FFmpeg y FFprobe incluidos.
+- Subtítulos externos SRT/WebVTT, pistas de texto integradas y búsqueda online en múltiples fuentes.
+- Ventana redimensionable, controles de reproducción y pantalla completa con ocultamiento automático de barras y cursor.
+- Envío a Chromecast, con búsqueda de dispositivos y conexión por IP local.
+
+## Instalación
+
+El paquete `Mukure-0.1.0-macos-arm64.zip` contiene `Mukure.app`. Descomprímelo y mueve la aplicación a **Aplicaciones**. FFmpeg y FFprobe vienen incluidos. Para crear el paquete desde el código fuente, sigue los pasos de desarrollo de abajo.
+
+## Uso
+
+Abre un video desde **Abrir**, selecciona un `.torrent` o pega un magnet. El modo **Directo** usa los formatos compatibles con macOS; **FFmpeg** convierte los demás formatos durante la reproducción.
+
+En **CC** puedes elegir una pista, cambiar el idioma, activar o desactivar la búsqueda online y ajustar la sincronización. Los subtítulos se buscan en OpenSubtitles —mediante el addon público de Stremio— y SubtitleDB sin cuenta. En **Fuentes de subtítulos** puedes conectar SubDL y Wyzie; la app incluye enlaces para obtener sus claves de API. La disponibilidad y los cupos dependen de cada proveedor.
+
+Para usar Chromecast, conecta ambos equipos a la misma red y pulsa **Enviar a Chromecast**. Selecciona los subtítulos externos antes de transmitir. Si el receptor no admite el formato original, activa **Convertir para TV**. Mantén Mukure abierto durante la transmisión.
+
+| Atajo | Acción |
+| --- | --- |
+| Espacio | Reproducir o pausar |
+| ← / → | Retroceder o adelantar 10 segundos |
+| M | Silenciar o activar sonido |
+| F | Entrar o salir de pantalla completa |
+
+En pantalla completa, los controles se ocultan tras 3 segundos de inactividad. Mueve el mouse o usa el teclado para mostrarlos.
+
+## Compatibilidad
+
+La versión 0.1 está dirigida a **macOS 11 o posterior en Apple Silicon**.
+
+- La conversión FFmpeg comienza desde el inicio y no permite saltos de posición.
+- Chromecast está en fase experimental; la compatibilidad de formatos depende del receptor. La conversión para TV usa H.264/AAC hasta 1080p.
+- Chromecast recibe una copia de los subtítulos externos seleccionados. Las pistas integradas se muestran en la Mac.
+- Se admiten subtítulos de texto; no se admiten PGS/DVD/DVB ni estilos avanzados de ASS.
+- Se mantiene un torrent activo por vez. No hay biblioteca persistente ni reanudación entre ejecuciones.
+
+## Privacidad y datos
+
+Mukure no requiere una cuenta propia ni incluye telemetría. Las claves de proveedores se guardan en el Llavero de macOS.
+
+La búsqueda online envía el título o nombre del video y el idioma a servicios de subtítulos. Puedes desactivarla en **CC**; los archivos de video no se suben a esos servicios. BitTorrent se conecta a peers, trackers y DHT, y también comparte piezas descargadas. Chromecast recibe el video por la red local.
+
+Los datos del torrent se guardan en la caché de la app y se eliminan al cerrar la sesión o salir normalmente. Un cierre forzado puede dejar archivos de caché. Los videos locales originales no se modifican ni se borran.
+
+## Desarrollo
+
+Requisitos: macOS Apple Silicon, Xcode Command Line Tools, Node.js 22.12 o posterior, pnpm 11, Rust estable y `pkg-config`. Consulta los [requisitos de Tauri para macOS](https://v2.tauri.app/start/prerequisites/#macos).
 
 ```sh
-pnpm install
+git clone https://github.com/alvarotala/mukure.git
+cd mukure
+pnpm install --frozen-lockfile
+pnpm prepare:app
 pnpm tauri dev
 ```
 
-`scripts/with-rust.sh` usa el toolchain del proyecto en `.tools/` si existe; en otro caso usa el Rust disponible en `PATH`. `.tools/` no forma parte del código versionado.
+`media:build` compila FFmpeg y x264 desde fuentes fijadas y verificadas. La primera ejecución puede tardar varios minutos. `pnpm dev` abre sólo la interfaz web; la reproducción requiere la aplicación Tauri.
 
-Para generar una aplicación local:
+Para generar la aplicación:
 
 ```sh
-pnpm tauri build --bundles app
+pnpm release
 ```
 
-El resultado queda en `src-tauri/target/release/bundle/macos/Mukure.app`. Este comando no prepara firma ni notarización para distribución.
+La compilación produce `src-tauri/target/release/bundle/macos/Mukure.app`. Los paquetes de distribución se guardan en `release/`. La compilación local usa firma ad hoc; la firma Developer ID y la notarización requieren credenciales de Apple.
 
-Comprobaciones disponibles:
+Para ejecutar las comprobaciones:
 
 ```sh
 pnpm build
@@ -30,89 +85,8 @@ pnpm check:rust
 pnpm test:rust
 ```
 
-`pnpm dev` por sí solo muestra una vista previa en el navegador; la reproducción y el motor de torrents requieren la aplicación Tauri.
+Consulta [CONTRIBUTING.md](CONTRIBUTING.md) para la estructura del proyecto, pruebas y compilación de dependencias, y [CHANGELOG.md](CHANGELOG.md) para las novedades de cada versión.
 
-Verificado en esta Mac: compilación de la interfaz y del `.app`, pruebas de HTTP Range y CORS, transferencias BitTorrent reales con `.torrent` y magnet entre dos clientes locales, lectura antes de completar la descarga, seek y limpieza. En la app nativa se reprodujeron un MP4 local, un magnet y un `.torrent` de prueba en modo directo y/o FFmpeg, y un MKV con pista de audio mediante FFmpeg. Son archivos sintéticos propios; no se probó disponibilidad o rendimiento de torrents públicos ni películas largas.
+## Licencias
 
-Las pruebas de subtítulos cubren lectura de SRT desde un peer real, cancelación sin peers, extracción integrada y conservación de tiempos al adelantar. La revisión nativa verificó SRT externo y MP4 timed text integrado en reproducción directa y FFmpeg, mostrar/ocultar, ajuste y conservación de la selección al cambiar de modo.
-
-## Uso
-
-1. Pega un magnet o abre un archivo `.torrent`.
-2. Espera sus metadatos y elige un archivo de video en la lista real del torrent.
-3. Usa **Directo** si tu sistema admite el formato; prueba **FFmpeg** si no lo reproduce.
-4. Detén la sesión para desconectar el torrent y borrar sus datos descargados.
-
-También puedes abrir un video del disco sin depender de la disponibilidad de peers. Sólo se mantiene un torrent activo por vez. La ventana permite redimensionar desde sus bordes o elegir un tamaño en la barra superior. En pantalla completa, las barras y el cursor se ocultan después de 3 segundos de inactividad; vuelven al mover el mouse o usar el teclado. Los paneles abiertos mantienen visibles los controles.
-
-## Subtítulos
-
-Con un video abierto, el panel **Subtítulos** permite:
-
-- Abrir un `.srt` o `.vtt` local, o elegir uno incluido en el torrent sin descargar todos sus archivos.
-- Encontrar automáticamente pistas integradas y archivos de subtítulos en la misma carpeta del video. FFprobe obtiene la lista y FFmpeg entrega las pistas de texto progresivamente, tanto en reproducción directa como en el modo FFmpeg.
-- Buscar en paralelo en OpenSubtitles (addon público de Stremio) y SubtitleDB sin cuenta. Puedes cambiar idioma, corregir el título o desactivar la búsqueda online.
-- Agregar SubDL y Wyzie desde **Fuentes de subtítulos**. El panel incluye enlaces oficiales para obtener claves gratuitas, probarlas, conectarlas y desconectarlas. Las claves se guardan en el Llavero de macOS, no en el almacenamiento del navegador. Los servicios externos pueden cambiar sus límites o disponibilidad.
-- Mostrar u ocultar la pista y ajustar su sincronización hasta ±60 segundos. Un valor positivo retrasa el texto.
-
-La selección se conserva al cambiar el modo de reproducción y se limpia al cambiar de video. En reproducción directa, los saltos reinician la extracción integrada cerca de la nueva posición, conservando sus marcas de tiempo. La disponibilidad de piezas y el índice del contenedor pueden demorar las pistas de un torrent.
-
-Los archivos externos admiten UTF-8, UTF-16 con BOM y Windows-1252, hasta 5 MiB. Las pistas integradas de texto incluyen SRT, ASS/SSA y MP4 timed text; la conversión conserva el texto y formato básico, no los estilos y posiciones avanzadas de ASS/WebVTT. Los subtítulos de imagen (PGS/DVD/DVB) se identifican, pero todavía no se reproducen.
-
-## Chromecast
-
-1. Conecta esta Mac y el Chromecast a la misma red y abre un video.
-2. Si quieres subtítulos, selecciona una pista externa en **CC** antes de transmitir.
-3. Pulsa el icono **Enviar a Chromecast** en la barra superior y elige un dispositivo. También puedes ingresar su IP local si no aparece en la búsqueda.
-4. Usa los controles de Mukure para pausar, continuar, ajustar volumen y, en envío directo, cambiar de posición. **Detener transmisión** deja el video pausado en la Mac.
-
-El envío directo entrega el archivo original desde la posición actual; los formatos y codecs compatibles dependen del receptor. **Convertir para TV** usa FFmpeg para H.264/AAC hasta 1080p mediante HLS: empieza desde cero y no permite saltos. La app debe permanecer abierta. Los subtítulos externos se envían como una copia WebVTT con el ajuste seleccionado; cambios posteriores requieren reiniciar la transmisión. Las pistas integradas siguen disponibles sólo en la Mac.
-
-La búsqueda usa mDNS en IPv4. Si no aparecen dispositivos, revisa el permiso de red local de macOS, el firewall y posibles VPN o redes de invitados. Sólo durante la transmisión se abre un servidor HTTP en la interfaz local, restringido al IP del receptor y a un token aleatorio. Detener o cambiar el video revoca ese acceso y cancela la conversión.
-
-Las comprobaciones locales cubren una sesión Cast simulada sobre TLS (inicio, heartbeat, carga, pausa, salto, detención y errores), entrega HTTP con rangos, acceso restringido, WebVTT y conversión HLS real. La reproducción en un Chromecast físico queda pendiente de prueba.
-
-## Qué ocurre en tu equipo
-
-- **Interfaz:** React dentro del WebView del sistema; los comandos Tauri conectan la interfaz con Rust.
-- **BitTorrent:** `librqbit 9.0.1` embebido. Sus lectores priorizan las piezas cercanas al cursor y esperan datos verificados antes de entregarlos. Un salto temporal solicita los rangos correspondientes.
-- **Transporte del video:** un listener HTTP interno en `127.0.0.1`, con puerto aleatorio y token por ejecución. Sólo entrega el video seleccionado; no requiere iniciar un servicio aparte. Chromecast agrega temporalmente el acceso local descrito arriba; no expone una API de control en la red.
-- **Decodificación directa:** el elemento de video del WebView usa los codecs disponibles en el sistema. El transporte admite peticiones HTTP Range; los saltos temporales dependen también del formato y del WebView.
-- **Compatibilidad FFmpeg:** un proceso local convierte a H.264 y AAC dentro de MP4 fragmentado. La interfaz lo incorpora mediante MediaSource, con un buffer de aproximadamente 30 segundos por delante y 30 por detrás; la descarga HTTP se cancela al cerrar el video. La conversión empieza desde el inicio y **este prototipo no implementa seeking arbitrario en ese modo**. Puede consumir bastante más CPU.
-
-No hay login, cuentas ni backend remoto de Mukure. No se agregó telemetría a la aplicación. **BitTorrent sí usa Internet:** conecta con peers, trackers y DHT, y puede subir piezas a otros peers; local no significa anónimo ni desconectado. La búsqueda online de subtítulos también usa Internet: envía el nombre/título del video y el idioma a los proveedores y puede resolver su identificador IMDb. Puedes desactivarla en CC para usar únicamente subtítulos locales o integrados. El video local no se sube a esos servicios.
-
-Los datos del torrent se guardan bajo el directorio de caché de la aplicación, en `sessions/session-*`; la ruta exacta aparece en la ayuda. La caché puede crecer hasta el tamaño del video. Detener el torrent borra sus datos y un cierre limpio elimina la caché de esa ejecución. Un cierre forzado o un crash puede dejar archivos residuales. El video local original no se borra.
-
-## FFmpeg
-
-Para facilitar la prueba en esta Mac, el proyecto usa los binarios de desarrollo `@ffmpeg-installer/darwin-arm64` y `@ffprobe-installer/darwin-arm64`; la configuración actual también los incluye como recursos del `.app` local. No hace falta instalar un servidor ni ejecutarlos manualmente. FFprobe se usa para descubrir las pistas integradas.
-
-Se puede elegir otro ejecutable con `MUKURE_FFMPEG` o usar una instalación disponible en `PATH`. Reinicia la aplicación después de cambiarlo:
-
-```sh
-MUKURE_FFMPEG=/ruta/al/ffmpeg pnpm tauri dev
-```
-
-Para sustituir FFprobe, usa `MUKURE_FFPROBE=/ruta/al/ffprobe`.
-
-**Distribución:** `librqbit 9.0.1` declara [Apache-2.0 en su manifiesto oficial](https://github.com/ikatson/rqbit/blob/v9.0.1/crates/librqbit/Cargo.toml), con su [licencia correspondiente](https://github.com/ikatson/rqbit/blob/v9.0.1/LICENSE). La licencia de FFmpeg depende de cómo se compiló. El binario npm actual informa `--enable-gpl --enable-version3 --enable-nonfree` y su propia salida `ffmpeg -L` indica que no es redistribuible. **Antes de distribuir un `.app`, reemplaza o excluye ese binario** y cumple los avisos y obligaciones del build elegido; la [licencia oficial de FFmpeg](https://github.com/FFmpeg/FFmpeg/blob/master/LICENSE.md) explica GPL y `nonfree`.
-
-## Alcance del prototipo
-
-La reproducción torrent necesita peers con las piezas solicitadas; un enlace sin fuentes puede quedar esperando o fallar al obtener metadatos. No hay reanudación entre ejecuciones ni biblioteca persistente. Aún no se implementaron selección de pistas de audio, subtítulos de imagen ni seeking arbitrario de la conversión FFmpeg. Windows, Linux y macOS Intel requieren adaptar el empaquetado y validar su WebView y codecs.
-
-Tauri usa el [WebView del sistema](https://v2.tauri.app/concept/architecture/), mientras que [Electron integra Chromium y Node.js](https://www.electronjs.org/docs/latest/tutorial/process-model). Eso cambia tamaño, dependencias y compatibilidad; no garantiza que un reproductor Tauri consuma menos recursos o reproduzca mejor. Para este caso conviene medir memoria, CPU, inicio y reproducción con los mismos videos, especialmente cuando FFmpeg está convirtiendo.
-
-Más información sobre el [streaming de rqbit y su prioridad de piezas](https://github.com/ikatson/rqbit#streaming-support).
-
-## Prueba reproducible con un peer local
-
-El ejemplo de desarrollo genera un `.torrent` de un video propio y mantiene un seeder y un tracker accesibles sólo en loopback:
-
-```sh
-sh scripts/with-rust.sh cargo run --manifest-path src-tauri/Cargo.toml \
-  --example local_fixture -- /ruta/video.mp4 /ruta/prueba.torrent
-```
-
-Deja esa terminal abierta y usa el `.torrent` o el magnet que imprime en Mukure. Ctrl+C detiene el seeder sin borrar el video original. El motor de la app sigue configurado para DHT y trackers normales; el contenido de este ejemplo procede del peer local.
+El código de Mukure está disponible bajo la [licencia MIT](LICENSE). FFmpeg, x264 y las demás dependencias conservan sus propias licencias; consulta [THIRD_PARTY.md](THIRD_PARTY.md).
